@@ -1,0 +1,114 @@
+export const WALLET_METHOD_MISSING = 'WALLET_METHOD_MISSING'
+
+export function hasFleet() {
+  return typeof window !== 'undefined' && Boolean(window.fleet?.isFleetWallet)
+}
+
+export function waitForFleet(timeoutMs = 700) {
+  if (hasFleet()) return Promise.resolve(true)
+
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (value) => {
+      if (done) return
+      done = true
+      resolve(value)
+    }
+
+    window.addEventListener('fleet#initialized', () => finish(hasFleet()), { once: true })
+    window.setTimeout(() => finish(hasFleet()), timeoutMs)
+  })
+}
+
+function normalizeAccount(account) {
+  if (!account?.address) return null
+  return {
+    ...account,
+    address: account.address.replace(/^0x/, '').toLowerCase(),
+  }
+}
+
+export async function connectFleet() {
+  if (!hasFleet()) throw new Error('FleetWallet not detected')
+
+  const account = await window.fleet.connect({
+    permissions: ['account', 'balance', 'tx.write'],
+    label: 'Canasino',
+    network: 'canopy',
+  })
+
+  return normalizeAccount(account)
+}
+
+export async function restoreFleet() {
+  if (!hasFleet() || !window.fleet?.getAccount) return null
+  try {
+    return normalizeAccount(await window.fleet.getAccount())
+  } catch {
+    return null
+  }
+}
+
+export async function disconnectFleet() {
+  try {
+    await window.fleet?.disconnect?.()
+  } catch {
+    // Disconnect is best-effort. The UI always clears local state.
+  }
+}
+
+export async function getFleetBalance() {
+  if (!hasFleet() || !window.fleet?.getBalance) return null
+  try {
+    return await window.fleet.getBalance()
+  } catch {
+    return null
+  }
+}
+
+export async function canopySignAndSubmit(params) {
+  if (!hasFleet()) throw new Error('FleetWallet not detected')
+
+  try {
+    const result = await window.fleet.request({
+      method: 'canopy_signAndSubmit',
+      params: [params],
+    })
+
+    return typeof result === 'string' ? { txHash: result } : result
+  } catch (error) {
+    if (
+      error?.code === 4200 ||
+      /unsupported|unknown method|not.*support/i.test(String(error?.message || ''))
+    ) {
+      const unsupported = new Error(WALLET_METHOD_MISSING)
+      unsupported.code = WALLET_METHOD_MISSING
+      throw unsupported
+    }
+    throw error
+  }
+}
+
+export async function joinBingoRound({ roundId, numCards, amount, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'join_room',
+    typeUrl: 'type.googleapis.com/types.MessageJoinRoom',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+      { number: 3, type: 'uint64', value: numCards },
+      { number: 4, type: 'uint64', value: amount },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Join Canasino Bingo room',
+      lines: [
+        { label: 'Room', value: `${roundId.slice(0, 8)}…` },
+        { label: 'Stake', value: `${(amount / 1_000_000).toLocaleString()} CNPY` },
+      ],
+    },
+  })
+}
