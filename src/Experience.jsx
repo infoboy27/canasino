@@ -370,7 +370,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       setPhase('round-ready')
       setMessages([{ id: 'created', type: 'system', user: 'Canasino', text: `Live round ${roundId.slice(0, 8)}… created. Chat is now linked to this room.` }])
     } catch (err) {
-      setError(`Could not create the live room: ${err.message}`)
+      setError(err?.status ? err.message : `Could not create the live room: ${err.message}`)
     }
   }
 
@@ -470,7 +470,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
               <div className="round-side">
                 <TxStatus phase={phase} error={error} txHash={txHash} />
                 {result && (
-                  <div className="result-card">
+                  <div className={`result-card ${result.winners?.includes(account?.address) ? 'is-win' : ''}`}>
                     <span className="cx-eyebrow">ROUND RESULT</span>
                     <strong>{result.winners?.includes(account?.address) ? 'You won' : 'Round settled'}</strong>
                     <p>{Array.isArray(result.winners) && result.winners.length ? `${result.winners.length} winner${result.winners.length > 1 ? 's' : ''} verified.` : 'Settlement received from the live round.'}</p>
@@ -624,11 +624,24 @@ function Fairness() {
 }
 
 function Rewards() {
+  const layers = [
+    [IconCoinLoop, 'Rakeback', 'Transparent rewards based on verified activity.'],
+    [IconStarBadge, 'VIP', 'Progression that can follow the wallet, not a hidden account.'],
+    [IconBracket, 'Tournaments', 'Community competition with visible prize pools.'],
+    [IconSparkle, 'Cosmetics', 'Ownable identity around cards, tables and profiles.'],
+  ]
   return (
     <section className="cx-rewards" id="rewards">
       <div className="cx-section-heading"><div><span className="cx-eyebrow">CASN ECOSYSTEM</span><h2>Reward the player, <em>not the opacity.</em></h2></div><p>Rakeback, tournaments, achievements and cosmetic ownership can grow around verified gameplay without contaminating the core round logic.</p></div>
-      <div className="reward-grid">
-        {[[IconCoinLoop,'Rakeback','Transparent rewards based on verified activity.'],[IconStarBadge,'VIP','Progression that can follow the wallet, not a hidden account.'],[IconBracket,'Tournaments','Community competition with visible prize pools.'],[IconSparkle,'Cosmetics','Ownable identity around cards, tables and profiles.']].map(([Icon,title,text]) => <div key={title}><i><Icon /></i><strong>{title}</strong><p>{text}</p><span>PLANNED LAYER</span></div>)}
+      <div className="reward-list">
+        {layers.map(([Icon, title, text], index) => (
+          <div className="reward-row" key={title}>
+            <span className="reward-index">{String(index + 1).padStart(2, '0')}</span>
+            <i><Icon /></i>
+            <div><strong>{title}</strong><p>{text}</p></div>
+            <span className="reward-status">Planned</span>
+          </div>
+        ))}
       </div>
     </section>
   )

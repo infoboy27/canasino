@@ -85,6 +85,17 @@ a { color: inherit; text-decoration: none; }
 .cx-hero { min-height: 650px; width: min(1220px, calc(100% - 56px)); margin: 0 auto; display: grid; grid-template-columns: 1.02fr .98fr; align-items: center; position: relative; padding: 78px 20px 60px; }
 .cx-hero-glow { position: absolute; width: 520px; height: 520px; right: 2%; top: 4%; border-radius: 50%; background: radial-gradient(circle, rgba(77,131,49,.17), rgba(212,175,55,.055) 36%, transparent 70%); filter: blur(4px); }
 .cx-hero-content { position: relative; z-index: 2; max-width: 650px; }
+.cx-hero-content .cx-eyebrow, .cx-hero h1, .cx-hero-content > p, .hero-buttons, .hero-proof-row {
+  opacity: 0; animation: heroRise .6s cubic-bezier(.16,1,.3,1) forwards;
+}
+.cx-hero-content .cx-eyebrow { animation-delay: .05s; }
+.cx-hero h1 { animation-delay: .12s; }
+.cx-hero-content > p { animation-delay: .22s; }
+.hero-buttons { animation-delay: .3s; }
+.hero-proof-row { animation-delay: .38s; }
+@keyframes heroRise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+.cx-hero-art { opacity: 0; animation: heroArtRise .8s cubic-bezier(.16,1,.3,1) .15s forwards; }
+@keyframes heroArtRise { from { opacity: 0; transform: translateY(10px) scale(.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .cx-eyebrow { font-size: 10px; letter-spacing: .18em; color: var(--cx-gold); font-weight: 700; display: flex; align-items: center; gap: 9px; text-transform: uppercase; }
 .cx-hero h1, .cx-section-heading h2, .cx-fairness h2, .cx-room-heading h1 { font-family: 'Fraunces', serif; letter-spacing: -.035em; }
 .cx-hero h1 { font-size: clamp(54px, 6vw, 90px); line-height: .95; margin: 20px 0 24px; font-weight: 600; }
@@ -145,9 +156,27 @@ a { color: inherit; text-decoration: none; }
 .cx-filter-row button { flex: 0 0 auto; border: 1px solid var(--cx-line); background: rgba(255,255,255,.015); color: #7f8780; border-radius: 9px; padding: 9px 14px; font-size: 11px; cursor: pointer; transition: .18s ease; }
 .cx-filter-row button.active, .cx-filter-row button:hover { border-color: rgba(119,213,61,.28); color: var(--cx-green-soft); background: rgba(119,213,61,.06); }
 .cx-games-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
-.cx-game-card { border-radius: 17px; border: 1px solid var(--cx-line); background: linear-gradient(145deg, rgba(25,30,27,.88), rgba(14,17,15,.92)); overflow: hidden; transition: transform .22s ease, border-color .22s ease, box-shadow .22s ease; }
-.cx-game-card:hover { transform: translateY(-4px); border-color: rgba(255,255,255,.14); box-shadow: 0 28px 58px rgba(0,0,0,.26); }
-.cx-game-card.is-live { border-color: rgba(119,213,61,.18); }
+.cx-game-card {
+  border-radius: 17px; border: 1px solid var(--cx-line);
+  background: linear-gradient(145deg, rgba(25,30,27,.88), rgba(14,17,15,.92));
+  overflow: hidden; transition: transform .25s cubic-bezier(.2,.8,.2,1), border-color .25s ease, box-shadow .25s ease, filter .3s ease;
+  opacity: 0; animation: cardRise .5s cubic-bezier(.16,1,.3,1) forwards;
+}
+.cx-games-grid > *:nth-child(1) { animation-delay: .02s; }
+.cx-games-grid > *:nth-child(2) { animation-delay: .08s; }
+.cx-games-grid > *:nth-child(3) { animation-delay: .14s; }
+.cx-games-grid > *:nth-child(4) { animation-delay: .2s; }
+.cx-games-grid > *:nth-child(5) { animation-delay: .26s; }
+.cx-games-grid > *:nth-child(6) { animation-delay: .32s; }
+@keyframes cardRise { from { opacity: 0; transform: translateY(16px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.cx-game-card:hover { transform: translateY(-5px) scale(1.012); border-color: rgba(255,255,255,.16); box-shadow: 0 30px 60px rgba(0,0,0,.3); }
+.cx-game-card.is-live { border-color: rgba(119,213,61,.22); box-shadow: 0 0 0 1px rgba(119,213,61,.05), 0 24px 50px rgba(0,0,0,.22); }
+.cx-game-card.is-live:hover { border-color: rgba(119,213,61,.4); box-shadow: 0 0 0 1px rgba(119,213,61,.1), 0 30px 60px rgba(119,213,61,.08); }
+/* "Coming soon" games recede -- one real game (Bingo) should read as the
+   obvious focal point instead of six tiles competing at equal weight. */
+.cx-game-card:not(.is-live) { filter: saturate(.55) brightness(.82); }
+.cx-game-card:not(.is-live):hover { filter: saturate(.85) brightness(.95); transform: translateY(-3px); }
+.cx-game-card:not(.is-live) h3 { color: #b7bcb6; }
 .cx-game-visual { height: 190px; position: relative; overflow: hidden; background: radial-gradient(circle at 50% 45%, rgba(212,175,55,.1), transparent 55%), #101410; }
 .game-bingo { background: radial-gradient(circle at 48% 46%, rgba(119,213,61,.13), transparent 56%), linear-gradient(145deg,#121a14,#0d100e); }
 .game-poker { background: radial-gradient(circle at 55% 45%, rgba(212,175,55,.11), transparent 55%), #121311; }
@@ -217,13 +246,15 @@ a { color: inherit; text-decoration: none; }
 .proof-demo > p { color:#5f6861; font-size:9px; line-height:1.6; margin:13px 2px 0; }
 
 .cx-rewards { padding-bottom: 120px; }
-.reward-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
-.reward-grid > div { min-height:210px; padding:22px; border:1px solid var(--cx-line); border-radius:15px; background:linear-gradient(145deg,rgba(255,255,255,.026),rgba(255,255,255,.012)); position:relative; overflow:hidden; transition: border-color .2s ease; }
-.reward-grid > div:hover { border-color: rgba(119,213,61,.22); }
-.reward-grid i { width:40px; height:40px; border-radius:11px; display:grid; place-items:center; background:rgba(119,213,61,.07); border:1px solid rgba(119,213,61,.16); color:var(--cx-green-soft); font-style:normal; font-size:19px; }
-.reward-grid strong { display:block; font:600 20px 'Fraunces',serif; margin-top:24px; }
-.reward-grid p { color:#757d76; font-size:10px; line-height:1.6; }
-.reward-grid span { position:absolute; left:22px; bottom:18px; color:#555d56; font-size:7px; letter-spacing:.13em; }
+.reward-list { border:1px solid var(--cx-line); border-radius:16px; background:linear-gradient(145deg,rgba(255,255,255,.022),rgba(255,255,255,.01)); overflow:hidden; }
+.reward-row { display:grid; grid-template-columns:34px 40px 1fr auto; gap:18px; align-items:center; padding:20px 24px; border-bottom:1px solid var(--cx-line); transition:background .2s ease; }
+.reward-row:last-child { border-bottom:0; }
+.reward-row:hover { background:rgba(119,213,61,.035); }
+.reward-index { font:500 15px 'Fraunces',serif; color:#4c5449; }
+.reward-row i { width:40px; height:40px; border-radius:11px; display:grid; place-items:center; background:rgba(119,213,61,.07); border:1px solid rgba(119,213,61,.16); color:var(--cx-green-soft); font-style:normal; font-size:18px; }
+.reward-row strong { display:block; font:600 15px 'Fraunces',serif; color:#e2e6e1; }
+.reward-row p { color:#757d76; font-size:10px; line-height:1.5; margin:3px 0 0; }
+.reward-status { font-size:8px; letter-spacing:.13em; color:#7c8477; border:1px solid var(--cx-line); border-radius:20px; padding:6px 12px; white-space:nowrap; }
 
 .cx-live-room { min-height: calc(100vh - 78px); position:relative; overflow:hidden; }
 .room-ambient { position:absolute; pointer-events:none; border-radius:50%; filter:blur(20px); }
@@ -256,6 +287,10 @@ a { color: inherit; text-decoration: none; }
 .draw-ball strong { font:700 39px/1 'Fraunces',serif; margin-top:2px; }
 .draw-machine.has-ball .draw-ball { animation:ballPop .45s cubic-bezier(.18,.9,.35,1.25); }
 @keyframes ballPop { 0%{transform:scale(.72) rotate(-12deg);filter:blur(3px)} 100%{transform:scale(1);filter:none} }
+/* Idle state shouldn't read as dead -- a slow breathing glow signals the
+   table is live and waiting, not broken or unfinished. */
+.draw-machine:not(.has-ball) .draw-ball { animation:ballBreathe 3.2s ease-in-out infinite; }
+@keyframes ballBreathe { 0%,100%{box-shadow:inset -18px -22px 30px rgba(66,45,7,.18),inset 10px 10px 18px rgba(255,255,255,.18),0 20px 45px rgba(0,0,0,.36),0 0 0 rgba(212,175,55,0)} 50%{box-shadow:inset -18px -22px 30px rgba(66,45,7,.18),inset 10px 10px 18px rgba(255,255,255,.22),0 20px 45px rgba(0,0,0,.36),0 0 26px rgba(212,175,55,.22)} }
 .draw-copy { position:relative; z-index:2; align-self:center; }
 .draw-copy h2 { margin:7px 0 4px; font:600 32px 'Fraunces',serif; }
 .draw-copy p { margin:0; color:#737c74; font-size:10px; }
@@ -300,8 +335,16 @@ a { color: inherit; text-decoration: none; }
 .cx-tx-state > p, .result-card p { color:#6e776f; font-size:8px; line-height:1.5; margin:12px 0 0; }
 .cx-tx-state .success-copy { color:#7e9f81; }
 .cx-tx-state .error-copy { color:#cf8179; }
-.result-card { border-color:rgba(119,213,61,.13); }
+.result-card { border-color:rgba(119,213,61,.13); animation:resultIn .4s cubic-bezier(.2,.9,.3,1.2); position:relative; overflow:hidden; }
+@keyframes resultIn { from{opacity:0;transform:translateY(8px) scale(.97)} to{opacity:1;transform:translateY(0) scale(1)} }
 .result-card > strong { display:block; font:600 20px 'Fraunces',serif; margin-top:7px; color:#dce8db; }
+/* The win moment is the emotional peak of the product -- it earns real
+   motion, not the same quiet fade every other state change gets. */
+.result-card.is-win { border-color:rgba(212,175,55,.4); background:linear-gradient(160deg,rgba(212,175,55,.1),rgba(255,255,255,.018)); animation:resultWinIn .55s cubic-bezier(.2,.85,.25,1.35); }
+.result-card.is-win::before { content:''; position:absolute; inset:-40%; background:radial-gradient(circle,rgba(212,175,55,.28),transparent 65%); animation:winGlow 1.4s ease-out; pointer-events:none; }
+.result-card.is-win > strong { color:var(--cx-gold-soft); text-shadow:0 0 18px rgba(212,175,55,.35); }
+@keyframes resultWinIn { 0%{opacity:0;transform:translateY(10px) scale(.9)} 55%{opacity:1;transform:translateY(-3px) scale(1.04)} 100%{transform:translateY(0) scale(1)} }
+@keyframes winGlow { from{opacity:1} to{opacity:0} }
 .refund-card { border:1px solid rgba(212,175,55,.18); border-radius:12px; background:rgba(212,175,55,.035); padding:13px; }
 .refund-card > p { color:#8a8163; font-size:8px; line-height:1.5; margin:6px 0 12px; }
 .refund-button { width:100%; border:1px solid rgba(119,213,61,.4); background:rgba(119,213,61,.1); color:var(--cx-green-soft); border-radius:8px; height:34px; font-size:9px; font-weight:700; cursor:pointer; }
@@ -379,7 +422,6 @@ a { color: inherit; text-decoration: none; }
   .cx-hero { grid-template-columns:1fr .8fr; }
   .cx-hero-art { transform:scale(.85); transform-origin:center right; }
   .cx-games-grid { grid-template-columns:repeat(2,1fr); }
-  .reward-grid { grid-template-columns:repeat(2,1fr); }
   .cx-room-layout { grid-template-columns:minmax(0,1fr) 270px; }
   .player-surface { grid-template-columns:minmax(0,1fr) 250px; }
   .cx-room-controls { grid-template-columns:1.3fr .55fr .8fr; }
@@ -460,8 +502,8 @@ a { color: inherit; text-decoration: none; }
   .cx-games-grid { grid-template-columns:1fr; }
   .cx-game-visual { height:175px; }
   .cx-section-heading h2, .cx-fairness h2 { font-size:38px; }
-  .reward-grid { grid-template-columns:1fr; }
-  .reward-grid > div { min-height:175px; }
+  .reward-row { grid-template-columns:26px 34px 1fr; row-gap:4px; padding:16px 18px; }
+  .reward-status { grid-column:3; justify-self:start; margin-top:2px; }
   .cx-room-heading h1 { font-size:42px; }
   .ball-stage { min-height:330px; grid-template-columns:1fr; place-items:center; padding:20px 18px 55px; text-align:center; }
   .draw-machine { width:160px; height:160px; }

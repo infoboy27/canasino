@@ -1,8 +1,24 @@
 export const API_BASE = import.meta.env.VITE_BINGO_API_URL || 'https://bingo.jfmcss.com'
 
+// Human-readable messages for the status codes a player can actually hit --
+// a raw "POST /rounds -> 429" is a debug string, not something to show
+// someone who just wants to play.
+function friendlyStatusMessage(status) {
+  if (status === 429) return 'This table is full of pending games right now. Try another room, or wait a moment and retry.'
+  if (status === 422) return 'That request was not accepted by the game server. Try again from the lobby.'
+  if (status >= 500) return 'The game server is having trouble right now. Try again in a moment.'
+  return null
+}
+
+function apiError(method, path, status) {
+  const err = new Error(friendlyStatusMessage(status) || `${method} ${path} -> ${status}`)
+  err.status = status
+  return err
+}
+
 async function jsonGet(path) {
   const response = await fetch(`${API_BASE}${path}`)
-  if (!response.ok) throw new Error(`GET ${path} -> ${response.status}`)
+  if (!response.ok) throw apiError('GET', path, response.status)
   return response.json()
 }
 
@@ -12,7 +28,7 @@ async function jsonPost(path, body = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!response.ok) throw new Error(`POST ${path} -> ${response.status}`)
+  if (!response.ok) throw apiError('POST', path, response.status)
   return response.json()
 }
 
