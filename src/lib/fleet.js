@@ -112,3 +112,30 @@ export async function joinBingoRound({ roundId, numCards, amount, rpcUrl, chainI
     },
   })
 }
+
+// Refunds every escrowed entry for a round the operator never settled.
+// On-chain, this is only accepted once the room has passed its expiry
+// height (roughly an hour of blocks after it opened) -- anyone can call
+// it, they just pay their own tx fee and receive nothing themselves.
+// Calling it too early fails on-chain with a clear "not yet expired"
+// error, which the caller should surface as-is rather than hide.
+export async function expireRoom({ roundId, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'expire_room',
+    typeUrl: 'type.googleapis.com/types.MessageExpireRoom',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Refund abandoned Canasino room',
+      lines: [
+        { label: 'Room', value: `${roundId.slice(0, 8)}…` },
+      ],
+    },
+  })
+}

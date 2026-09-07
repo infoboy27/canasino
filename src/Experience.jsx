@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   connectFleet,
   disconnectFleet,
+  expireRoom,
   getFleetBalance,
   hasFleet,
   joinBingoRound,
@@ -43,6 +44,12 @@ const nav = [
 const starterMessages = [
   { id: 'system-1', type: 'system', user: 'Canasino', text: 'Room chat opens when a live Bingo round is created.' },
 ]
+
+// The chain accepts MessageExpireRoom (refund) only after the room's real
+// on-chain deadline (~720 blocks after it opened). This is a rough client
+// hint for when to surface the option -- the chain, not this constant, is
+// the actual authority; an early attempt just fails with a clear error.
+const EXPIRE_HINT_MS = 60 * 60 * 1000
 
 function shortAddress(address = '') {
   if (!address) return 'Guest'
@@ -220,6 +227,11 @@ function LiveRoom({ account, onConnect, walletBalance }) {
   const [chatConnected, setChatConnected] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [result, setResult] = useState(null)
+  const [roundCreatedAt, setRoundCreatedAt] = useState(null)
+  const [now, setNow] = useState(() => Date.now())
+  const [refundBusy, setRefundBusy] = useState(false)
+  const [refundError, setRefundError] = useState('')
+  const [refundTxHash, setRefundTxHash] = useState('')
   const chatSocketRef = useRef(null)
   const roundSocketRef = useRef(null)
 
@@ -298,6 +310,35 @@ function LiveRoom({ account, onConnect, walletBalance }) {
 
   const amount = useMemo(() => entryCost(roundInfo?.entryFee ?? selectedRoom?.entryFee ?? 0, numCards), [roundInfo, selectedRoom, numCards])
   const latestBall = balls[balls.length - 1]
+  const canOfferRefund = round?.roundId && phase !== 'confirmed' && roundCreatedAt
+    && (now - roundCreatedAt) >= EXPIRE_HINT_MS
+
+  useEffect(() => {
+    if (!round?.roundId || phase === 'confirmed') return undefined
+    const id = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(id)
+  }, [round?.roundId, phase])
+
+  async function handleExpireRoom() {
+    if (!round?.roundId || !roundInfo?.rpcUrl) return
+    if (!account) { onConnect(); return }
+    setRefundBusy(true); setRefundError(''); setRefundTxHash('')
+    try {
+      const signed = await expireRoom({
+        roundId: round.roundId, rpcUrl: roundInfo.rpcUrl,
+        chainId: roundInfo.chainId, networkId: roundInfo.networkId,
+      })
+      setRefundTxHash(signed?.txHash || '')
+      setMessages((current) => [...current, {
+        id: `refund-${Date.now()}`, type: 'system', user: 'Canasino',
+        text: 'Refund submitted — escrowed entries for this room are being returned on-chain.',
+      }])
+    } catch (err) {
+      setRefundError(err?.message || 'The room has not reached its refund deadline yet.')
+    } finally {
+      setRefundBusy(false)
+    }
+  }
 
   async function handleCreateRoom() {
     if (!selectedRoom) return
@@ -308,12 +349,16 @@ function LiveRoom({ account, onConnect, walletBalance }) {
     setProof(null)
     setTxHash('')
     setPhase('idle')
+    setRoundCreatedAt(null)
+    setRefundError('')
+    setRefundTxHash('')
 
     try {
       const created = await createRound(selectedRoom)
       const roundId = created.roundId || created.round_id
       if (!roundId) throw new Error('Game server returned no round id')
       setRound({ ...created, roundId })
+      setRoundCreatedAt(Date.now())
       const info = await getRoundInfo(roundId)
       setRoundInfo({
         entryFee: Number(info.entryFee ?? info.entry_fee ?? selectedRoom.entryFee),
@@ -429,6 +474,22 @@ function LiveRoom({ account, onConnect, walletBalance }) {
                     <span className="cx-eyebrow">ROUND RESULT</span>
                     <strong>{result.winners?.includes(account?.address) ? 'You won' : 'Round settled'}</strong>
                     <p>{Array.isArray(result.winners) && result.winners.length ? `${result.winners.length} winner${result.winners.length > 1 ? 's' : ''} verified.` : 'Settlement received from the live round.'}</p>
+                  </div>
+                )}
+                {canOfferRefund && !refundTxHash && (
+                  <div className="refund-card">
+                    <span className="cx-eyebrow">ROOM TAKING TOO LONG?</span>
+                    <p>If this room never settles, anyone can trigger an on-chain refund of every escrowed entry once the room passes its expiry window.</p>
+                    <button className="refund-button" onClick={handleExpireRoom} disabled={refundBusy}>
+                      {refundBusy ? 'Requesting refund…' : account ? 'Claim refund' : 'Connect wallet to claim'}
+                    </button>
+                    {refundError && <p className="error-copy">{refundError}</p>}
+                  </div>
+                )}
+                {refundTxHash && (
+                  <div className="refund-card">
+                    <span className="cx-eyebrow">REFUND SUBMITTED</span>
+                    <p>Escrowed entries for this room are being returned on-chain.</p>
                   </div>
                 )}
               </div>
