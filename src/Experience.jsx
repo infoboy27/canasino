@@ -10,7 +10,6 @@ import {
   WALLET_METHOD_MISSING,
 } from './lib/fleet'
 import {
-  API_BASE,
   createRound,
   entryCost,
   getCard,
@@ -21,6 +20,7 @@ import {
   openRoundSocket,
   registerRound,
 } from './lib/bingo'
+import { IconBracket, IconBroadcast, IconChip, IconCoinLoop, IconGithub, IconHome, IconLaurel, IconShieldCheck, IconSparkle, IconStarBadge } from './lib/icons'
 import './experience.css'
 
 const games = [
@@ -33,11 +33,11 @@ const games = [
 ]
 
 const nav = [
-  ['home', '⌂', 'Casino'],
-  ['games', '◆', 'Games'],
-  ['rooms', '◉', 'Live rooms'],
-  ['fairness', '✓', 'Provably Fair'],
-  ['rewards', '♛', 'Rewards'],
+  ['home', IconHome, 'Casino'],
+  ['games', IconChip, 'Games'],
+  ['rooms', IconBroadcast, 'Live rooms'],
+  ['fairness', IconShieldCheck, 'Provably Fair'],
+  ['rewards', IconLaurel, 'Rewards'],
 ]
 
 const starterMessages = [
@@ -389,11 +389,6 @@ function LiveRoom({ account, onConnect, walletBalance }) {
             <h1>Enter the <em>gold room.</em></h1>
             <p>Create a real round, sign the entry in FleetWallet, watch the draw and talk to the table without leaving the game.</p>
           </div>
-          <div className="room-network-card">
-            <small>GAME SERVER</small>
-            <strong>{API_BASE.replace(/^https?:\/\//, '')}</strong>
-            <span><StatusDot online={roomsState === 'ready'} /> {roomsState === 'ready' ? 'Connected' : roomsState === 'loading' ? 'Connecting' : 'Unavailable'}</span>
-          </div>
         </div>
 
         <div className="cx-room-layout">
@@ -572,7 +567,7 @@ function Rewards() {
     <section className="cx-rewards" id="rewards">
       <div className="cx-section-heading"><div><span className="cx-eyebrow">CASN ECOSYSTEM</span><h2>Reward the player, <em>not the opacity.</em></h2></div><p>Rakeback, tournaments, achievements and cosmetic ownership can grow around verified gameplay without contaminating the core round logic.</p></div>
       <div className="reward-grid">
-        {[['↺','Rakeback','Transparent rewards based on verified activity.'],['♛','VIP','Progression that can follow the wallet, not a hidden account.'],['⚑','Tournaments','Community competition with visible prize pools.'],['✦','Cosmetics','Ownable identity around cards, tables and profiles.']].map(([icon,title,text]) => <div key={title}><i>{icon}</i><strong>{title}</strong><p>{text}</p><span>PLANNED LAYER</span></div>)}
+        {[[IconCoinLoop,'Rakeback','Transparent rewards based on verified activity.'],[IconStarBadge,'VIP','Progression that can follow the wallet, not a hidden account.'],[IconBracket,'Tournaments','Community competition with visible prize pools.'],[IconSparkle,'Cosmetics','Ownable identity around cards, tables and profiles.']].map(([Icon,title,text]) => <div key={title}><i><Icon /></i><strong>{title}</strong><p>{text}</p><span>PLANNED LAYER</span></div>)}
       </div>
     </section>
   )
@@ -645,8 +640,8 @@ export default function Experience() {
       <div className="cx-noise" />
       <aside className="cx-sidebar">
         <button className="cx-logo-button" onClick={() => navigate('home')}><Logo compact /></button>
-        <nav>{nav.map(([id, icon, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => navigate(id)} title={label}><span>{icon}</span><small>{label}</small></button>)}</nav>
-        <div className="sidebar-bottom"><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer" title="GitHub">⌘</a><button title="Responsible play">18+</button></div>
+        <nav>{nav.map(([id, Icon, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => navigate(id)} title={label}><span><Icon /></span><small>{label}</small></button>)}</nav>
+        <div className="sidebar-bottom"><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer" title="GitHub"><IconGithub /></a><button title="Responsible play">18+</button></div>
       </aside>
 
       <div className="cx-page">
@@ -678,7 +673,7 @@ export default function Experience() {
           <div><a href="#fairness">Provably Fair</a><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer">GitHub</a></div>
         </footer>
 
-        <nav className="cx-mobile-nav">{nav.slice(0, 4).map(([id, icon, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => navigate(id)}><span>{icon}</span><small>{label}</small></button>)}</nav>
+        <nav className="cx-mobile-nav">{nav.slice(0, 4).map(([id, Icon, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => navigate(id)}><span><Icon /></span><small>{label}</small></button>)}</nav>
       </div>
     </div>
   )
