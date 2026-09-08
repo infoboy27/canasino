@@ -113,6 +113,77 @@ export async function joinBingoRound({ roundId, numCards, amount, rpcUrl, chainI
   })
 }
 
+export async function joinDominoTable({ roundId, amount, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'join_domino',
+    typeUrl: 'type.googleapis.com/types.MessageJoinDomino',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+      { number: 3, type: 'uint64', value: amount },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Join Canasino Domino table',
+      lines: [
+        { label: 'Table', value: `${roundId.slice(0, 8)}…` },
+        { label: 'Stake', value: `${(amount / 1_000_000).toLocaleString()} CNPY` },
+      ],
+    },
+  })
+}
+
+export async function joinPokerTable({ roundId, amount, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'join_poker',
+    typeUrl: 'type.googleapis.com/types.MessageJoinPoker',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+      { number: 3, type: 'uint64', value: amount },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Join Canasino Poker table',
+      lines: [
+        { label: 'Table', value: `${roundId.slice(0, 8)}…` },
+        { label: 'Buy-in', value: `${(amount / 1_000_000).toLocaleString()} CNPY` },
+      ],
+    },
+  })
+}
+
+export async function placeRouletteBet({ roundId, betType, betNumber, amount, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'roulette_bet',
+    typeUrl: 'type.googleapis.com/types.MessageRouletteBet',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+      { number: 3, type: 'string', value: betType },
+      { number: 4, type: 'uint64', value: betNumber },
+      { number: 5, type: 'uint64', value: amount },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Place a Canasino Roulette bet',
+      lines: [
+        { label: 'Bet', value: betType === 'straight' ? `Straight ${betNumber}` : betType },
+        { label: 'Stake', value: `${(amount / 1_000_000).toLocaleString()} CNPY` },
+      ],
+    },
+  })
+}
+
 // Refunds every escrowed entry for a round the operator never settled.
 // On-chain, this is only accepted once the room has passed its expiry
 // height (roughly an hour of blocks after it opened) -- anyone can call

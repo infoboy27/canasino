@@ -6,6 +6,9 @@ import {
   getFleetBalance,
   hasFleet,
   joinBingoRound,
+  joinDominoTable,
+  joinPokerTable,
+  placeRouletteBet,
   restoreFleet,
   waitForFleet,
   WALLET_METHOD_MISSING,
@@ -21,15 +24,42 @@ import {
   openRoundSocket,
   registerRound,
 } from './lib/bingo'
+import {
+  getRouletteProof,
+  getRouletteRoundInfo,
+  openRouletteRound,
+  openRouletteSocket,
+  registerRouletteBet,
+} from './lib/roulette'
+import {
+  getDominoHand,
+  getDominoProof,
+  getDominoRound,
+  getDominoRoundInfo,
+  openDominoRound,
+  openDominoSocket,
+  postDominoMove,
+  registerDominoJoin,
+} from './lib/domino'
+import {
+  getPokerHand,
+  getPokerProof,
+  getPokerRound,
+  getPokerRoundInfo,
+  openPokerRound,
+  openPokerSocket,
+  postPokerAction,
+  registerPokerJoin,
+} from './lib/poker'
 import { IconBracket, IconBroadcast, IconChip, IconCoinLoop, IconGithub, IconHome, IconLaurel, IconShieldCheck, IconSparkle, IconStarBadge } from './lib/icons'
 import './experience.css'
 
 const games = [
   { id: 'bingo', name: 'Bingo', category: 'Social', glyph: 'B', live: true, players: 'Live rooms', description: 'Community rooms, verifiable draws and on-chain settlement.' },
-  { id: 'poker', name: 'Poker', category: 'Table', glyph: '♠', live: false, players: 'Coming soon', description: 'Competitive tables with transparent pots and tournament play.' },
-  { id: 'domino', name: 'Domino', category: 'Social', glyph: '••', live: false, players: 'Coming soon', description: 'Caribbean table culture rebuilt for on-chain multiplayer.' },
+  { id: 'poker', name: 'Poker', category: 'Table', glyph: '♠', live: true, players: 'Heads-up', description: 'Heads-up No-Limit Hold’em, settled on-chain from a replayed betting-action log.' },
+  { id: 'domino', name: 'Domino', category: 'Social', glyph: '••', live: true, players: 'Heads-up', description: 'Classic block dominoes, two players, settled on-chain from a replayed move log.' },
   { id: 'pool', name: 'Pool', category: 'Skill', glyph: '8', live: false, players: 'Coming soon', description: 'Head-to-head skill matches with escrowed stakes.' },
-  { id: 'roulette', name: 'Roulette', category: 'Table', glyph: '0', live: false, players: 'Coming soon', description: 'Classic roulette with auditable round inputs.' },
+  { id: 'roulette', name: 'Roulette', category: 'Table', glyph: '0', live: true, players: 'Live wheel', description: 'European single-zero wheel, commit-reveal spin, settled on-chain.' },
   { id: 'crash', name: 'Crash', category: 'Originals', glyph: '↗', live: false, players: 'Coming soon', description: 'A fast Canasino Original built around transparent settlement.' },
 ]
 
@@ -50,6 +80,38 @@ const starterMessages = [
 // hint for when to surface the option -- the chain, not this constant, is
 // the actual authority; an early attempt just fails with a clear error.
 const EXPIRE_HINT_MS = 60 * 60 * 1000
+
+// Standard European wheel: physical pocket order (not numeric order) and the
+// fixed red/black layout -- must match contract/game/roulette.py exactly, or
+// the visual wheel would land somewhere the chain never actually paid.
+const WHEEL_ORDER = [0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26]
+const RED_NUMBERS = new Set([1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36])
+const POCKET_ANGLE = 360 / WHEEL_ORDER.length
+const WHEEL_GRADIENT = WHEEL_ORDER.map((number, index) => {
+  const color = number === 0 ? '#1a5a31' : RED_NUMBERS.has(number) ? '#6e211d' : '#151a17'
+  return `${color} ${(index * POCKET_ANGLE).toFixed(3)}deg ${((index + 1) * POCKET_ANGLE).toFixed(3)}deg`
+}).join(', ')
+// The felt layout reads bottom-to-top in a real table (1 nearest the player);
+// each row here is one "column" bet -- row 0 wins col3, row 1 wins col2, row 2 wins col1.
+const TABLE_ROWS = [
+  { bet: 'col3', numbers: [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36] },
+  { bet: 'col2', numbers: [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35] },
+  { bet: 'col1', numbers: [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34] },
+]
+const ROULETTE_BET_LABELS = {
+  red: 'Red', black: 'Black', odd: 'Odd', even: 'Even', low: '1 – 18', high: '19 – 36',
+  dozen1: '1st 12', dozen2: '2nd 12', dozen3: '3rd 12', col1: '2:1', col2: '2:1', col3: '2:1',
+}
+
+function colorOf(number) {
+  if (number === 0) return 'green'
+  return RED_NUMBERS.has(number) ? 'red' : 'black'
+}
+
+function betLabel(bet) {
+  if (!bet) return ''
+  return bet.type === 'straight' ? `Straight ${bet.number}` : ROULETTE_BET_LABELS[bet.type] || bet.type
+}
 
 function shortAddress(address = '') {
   if (!address) return 'Guest'
@@ -182,6 +244,153 @@ function BingoCard({ card = [], balls = [] }) {
           return <span className={hit ? 'hit' : ''} key={`${number}-${index}`}>{free ? '★' : number}</span>
         })}
       </div>
+    </div>
+  )
+}
+
+function RouletteWheel({ spinPhase, spinNumber }) {
+  const [rotation, setRotation] = useState(0)
+  const spinningRef = useRef(false)
+
+  useEffect(() => {
+    if (spinPhase !== 'spinning') { spinningRef.current = false; return undefined }
+    spinningRef.current = true
+    let raf
+    const tick = () => {
+      if (!spinningRef.current) return
+      setRotation((value) => value + 7)
+      raf = window.requestAnimationFrame(tick)
+    }
+    raf = window.requestAnimationFrame(tick)
+    return () => { spinningRef.current = false; window.cancelAnimationFrame(raf) }
+  }, [spinPhase])
+
+  useEffect(() => {
+    if (spinPhase !== 'settled' || spinNumber == null) return
+    spinningRef.current = false
+    const pocketIndex = WHEEL_ORDER.indexOf(spinNumber)
+    setRotation((value) => (value - (value % 360)) + 4 * 360 - pocketIndex * POCKET_ANGLE)
+  }, [spinPhase, spinNumber])
+
+  return (
+    <div className="rw-wheel-wrap">
+      <span className="rw-pointer" aria-hidden="true" />
+      <div
+        className="rw-disc"
+        style={{
+          background: `conic-gradient(${WHEEL_GRADIENT})`,
+          transform: `rotate(${rotation}deg)`,
+          transition: spinPhase === 'settled' ? 'transform 4.2s cubic-bezier(.12,.83,.19,1)' : 'none',
+        }}
+        aria-hidden="true"
+      >
+        {WHEEL_ORDER.map((number, index) => {
+          const angle = index * POCKET_ANGLE + POCKET_ANGLE / 2
+          return (
+            <span
+              className={`rw-pocket-label ${colorOf(number)}`}
+              key={number}
+              style={{ transform: `rotate(${angle}deg) translateY(-96px) rotate(${-angle}deg)` }}
+            >
+              {number}
+            </span>
+          )
+        })}
+      </div>
+      <div className={`rw-hub ${colorOf(spinNumber ?? -1)} ${spinPhase === 'settled' ? 'has-result' : ''}`}>
+        <strong>{spinPhase === 'settled' && spinNumber != null ? spinNumber : '—'}</strong>
+      </div>
+    </div>
+  )
+}
+
+function BettingTable({ selectedBet, onSelect, disabled }) {
+  const isSelected = (type, number) => selectedBet?.type === type && (type !== 'straight' || selectedBet?.number === number)
+  const cellClass = (type, number) => `rw-cell ${type === 'straight' ? colorOf(number) : ''} ${isSelected(type, number) ? 'selected' : ''}`
+
+  return (
+    <div className={`rw-table ${disabled ? 'is-disabled' : ''}`}>
+      <div className="rw-grid">
+        <button type="button" className={cellClass('straight', 0)} onClick={() => onSelect('straight', 0)} disabled={disabled}>0</button>
+        <div className="rw-grid-body">
+          {TABLE_ROWS.map((row) => (
+            <div className="rw-grid-row" key={row.bet}>
+              {row.numbers.map((number) => (
+                <button type="button" key={number} className={cellClass('straight', number)} onClick={() => onSelect('straight', number)} disabled={disabled}>
+                  {number}
+                </button>
+              ))}
+              <button type="button" className={`rw-cell rw-col-bet ${isSelected(row.bet) ? 'selected' : ''}`} onClick={() => onSelect(row.bet)} disabled={disabled}>2:1</button>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="rw-outside">
+        <button type="button" className={`rw-cell ${isSelected('dozen1') ? 'selected' : ''}`} onClick={() => onSelect('dozen1')} disabled={disabled}>1st 12</button>
+        <button type="button" className={`rw-cell ${isSelected('dozen2') ? 'selected' : ''}`} onClick={() => onSelect('dozen2')} disabled={disabled}>2nd 12</button>
+        <button type="button" className={`rw-cell ${isSelected('dozen3') ? 'selected' : ''}`} onClick={() => onSelect('dozen3')} disabled={disabled}>3rd 12</button>
+      </div>
+      <div className="rw-outside rw-outside-even">
+        <button type="button" className={`rw-cell ${isSelected('low') ? 'selected' : ''}`} onClick={() => onSelect('low')} disabled={disabled}>1–18</button>
+        <button type="button" className={`rw-cell ${isSelected('even') ? 'selected' : ''}`} onClick={() => onSelect('even')} disabled={disabled}>Even</button>
+        <button type="button" className={`rw-cell red ${isSelected('red') ? 'selected' : ''}`} onClick={() => onSelect('red')} disabled={disabled}>Red</button>
+        <button type="button" className={`rw-cell black ${isSelected('black') ? 'selected' : ''}`} onClick={() => onSelect('black')} disabled={disabled}>Black</button>
+        <button type="button" className={`rw-cell ${isSelected('odd') ? 'selected' : ''}`} onClick={() => onSelect('odd')} disabled={disabled}>Odd</button>
+        <button type="button" className={`rw-cell ${isSelected('high') ? 'selected' : ''}`} onClick={() => onSelect('high')} disabled={disabled}>19–36</button>
+      </div>
+    </div>
+  )
+}
+
+const PIP_POSITIONS = {
+  0: [],
+  1: [[1, 1]],
+  2: [[0, 0], [2, 2]],
+  3: [[0, 0], [1, 1], [2, 2]],
+  4: [[0, 0], [0, 2], [2, 0], [2, 2]],
+  5: [[0, 0], [0, 2], [1, 1], [2, 0], [2, 2]],
+  6: [[0, 0], [0, 2], [1, 0], [1, 2], [2, 0], [2, 2]],
+}
+
+function DominoPips({ value }) {
+  const dots = PIP_POSITIONS[value] || []
+  return (
+    <div className="dm-pips">
+      {Array.from({ length: 9 }).map((_, index) => {
+        const row = Math.floor(index / 3)
+        const col = index % 3
+        const on = dots.some(([r, c]) => r === row && c === col)
+        return <span className={on ? 'on' : ''} key={index} />
+      })}
+    </div>
+  )
+}
+
+function DominoTile({ tile, faceDown = false, orientation = 'horizontal', selected = false, disabled = false, onClick }) {
+  if (faceDown) return <div className={`dm-tile face-down ${orientation}`} />
+  const [low, high] = tile
+  return (
+    <button
+      type="button"
+      className={`dm-tile ${orientation} ${selected ? 'selected' : ''}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <DominoPips value={low} /><i /><DominoPips value={high} />
+    </button>
+  )
+}
+
+const SUIT_SYMBOL = { s: '♠', h: '♥', d: '♦', c: '♣' }
+
+function PlayingCard({ card, faceDown = false }) {
+  if (faceDown || !card) return <div className="pk-card face-down" />
+  const [rank, suit] = card
+  const red = suit === 'h' || suit === 'd'
+  return (
+    <div className={`pk-card ${red ? 'red' : 'black'}`}>
+      <span className="pk-card-rank">{rank}</span>
+      <span className="pk-card-suit">{SUIT_SYMBOL[suit] || suit}</span>
     </div>
   )
 }
@@ -549,6 +758,814 @@ function LiveRoom({ account, onConnect, walletBalance }) {
   )
 }
 
+// Backend note: each round is opened fresh on request (no shared, continuously-
+// spinning table yet -- see the roadmap memory on this trade-off). This
+// component papers over that by auto-opening the next round a few seconds
+// after each settle, so the table reads as "always live" from the player's
+// side without needing a backend change.
+const ROULETTE_AUTO_RESPIN_MS = 6_000
+
+function RouletteRoom({ account, onConnect, walletBalance }) {
+  const [roundId, setRoundId] = useState(null)
+  const [roundMeta, setRoundMeta] = useState(null)
+  const [roundInfo, setRoundInfo] = useState(null)
+  const [openError, setOpenError] = useState('')
+  const [secondsLeft, setSecondsLeft] = useState(null)
+  const [spinPhase, setSpinPhase] = useState('waiting')
+  const [spinResult, setSpinResult] = useState(null)
+  const [proof, setProof] = useState(null)
+  const [selectedBet, setSelectedBet] = useState(null)
+  const [betAmount, setBetAmount] = useState('5')
+  const [myBet, setMyBet] = useState(null)
+  const [phase, setPhase] = useState('idle')
+  const [error, setError] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const socketRef = useRef(null)
+  const respinTimerRef = useRef(null)
+
+  async function startNewRound() {
+    setOpenError('')
+    setSpinPhase('waiting')
+    setSpinResult(null)
+    setProof(null)
+    setSelectedBet(null)
+    setMyBet(null)
+    setPhase('idle')
+    setError('')
+    setTxHash('')
+    setSecondsLeft(null)
+
+    try {
+      const created = await openRouletteRound()
+      const id = created.roundId
+      const info = await getRouletteRoundInfo(id)
+      setRoundMeta(created)
+      setRoundInfo({
+        rakeBps: Number(info.rakeBps ?? created.rakeBps ?? 0),
+        minBet: Number(info.minBet ?? created.minBet ?? 0),
+        maxBet: Number(info.maxBet ?? created.maxBet ?? 0),
+        chainId: Number(info.chainId),
+        networkId: Number(info.networkId),
+        rpcUrl: info.rpcUrl,
+      })
+      setBetAmount(String(Math.max(1, Math.round((info.minBet ?? created.minBet ?? 1_000_000) / 1_000_000))))
+      setPhase('round-ready')
+      setRoundId(id)
+    } catch (err) {
+      setOpenError(`Could not open a new wheel: ${err.message}`)
+    }
+  }
+
+  useEffect(() => {
+    startNewRound()
+    return () => window.clearTimeout(respinTimerRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!roundId) return undefined
+    let ws
+    try {
+      ws = openRouletteSocket(roundId)
+      socketRef.current = ws
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data)
+          if (message.type === 'tick') setSecondsLeft(message.secondsLeft)
+          if (message.type === 'spinning') { setSecondsLeft(0); setSpinPhase('spinning') }
+          if (message.type === 'settled') {
+            setSpinPhase('settled')
+            setSpinResult(message)
+            getRouletteProof(roundId).then(setProof).catch(() => null)
+            respinTimerRef.current = window.setTimeout(startNewRound, ROULETTE_AUTO_RESPIN_MS)
+          }
+          if (message.type === 'error') setOpenError(message.message || 'The wheel connection was lost.')
+        } catch {
+          // Ignore malformed socket frames.
+        }
+      }
+    } catch {
+      setOpenError('Could not connect to the wheel socket.')
+    }
+
+    getRouletteProof(roundId).then(setProof).catch(() => null)
+
+    return () => { ws?.close(); socketRef.current = null }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roundId])
+
+  const betsOpen = phase !== 'idle' && spinPhase === 'waiting' && (secondsLeft == null || secondsLeft > 0)
+  const minBetWhole = roundInfo?.minBet ? roundInfo.minBet / 1_000_000 : 0
+  const maxBetWhole = roundInfo?.maxBet ? roundInfo.maxBet / 1_000_000 : 0
+
+  async function handlePlaceBet() {
+    setError('')
+    if (!account) { onConnect(); return }
+    if (!selectedBet) { setError('Choose a bet on the table first.'); return }
+    if (!roundId || !roundInfo?.rpcUrl) { setError('Waiting for the wheel to open.'); return }
+    const amount = Math.round(Number(betAmount) * 1_000_000)
+    if (!Number.isFinite(amount) || amount < roundInfo.minBet || amount > roundInfo.maxBet) {
+      setError(`Bet must be between ${minBetWhole} and ${maxBetWhole} CNPY.`)
+      return
+    }
+
+    try {
+      setPhase('awaiting-signature')
+      const signed = await placeRouletteBet({
+        roundId, betType: selectedBet.type, betNumber: selectedBet.number || 0, amount,
+        rpcUrl: roundInfo.rpcUrl, chainId: roundInfo.chainId, networkId: roundInfo.networkId,
+      })
+      setTxHash(signed?.txHash || '')
+      setPhase('submitted')
+      await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount)
+      setMyBet({ ...selectedBet, amount })
+      setPhase('confirmed')
+    } catch (err) {
+      if (err?.code === WALLET_METHOD_MISSING || err?.message === WALLET_METHOD_MISSING) {
+        setError('This FleetWallet build does not expose canopy_signAndSubmit for roulette_bet yet. Update FleetWallet before playing with real value.')
+      } else {
+        setError(err?.message || 'The bet was not accepted.')
+      }
+      setPhase('round-ready')
+    }
+  }
+
+  const myPayout = spinResult && myBet ? spinResult.payouts?.[account?.address] : null
+  const won = myPayout != null && myPayout > 0
+
+  return (
+    <section className="cx-live-room rw-room" id="rooms">
+      <div className="room-ambient ambient-one" />
+      <div className="room-ambient ambient-two" />
+
+      <div className="cx-room-main">
+        <div className="cx-room-heading">
+          <div>
+            <span className="cx-eyebrow"><StatusDot online={spinPhase !== 'waiting' || Boolean(roundId)} /> ROULETTE · LIVE ON CANOPY</span>
+            <h1>Spin the <em>wheel.</em></h1>
+            <p>European single-zero wheel. The operator commits to a hidden seed before the table opens; the spin is derived from it and only revealed at settle.</p>
+          </div>
+        </div>
+
+        <div className="cx-room-layout rw-layout">
+          <div className="cx-game-stage rw-stage">
+            <div className="rw-stage-top">
+              <RouletteWheel spinPhase={spinPhase} spinNumber={spinResult?.spin} />
+              <div className="rw-status-copy">
+                <span className="cx-eyebrow">
+                  {spinPhase === 'spinning' ? 'SPINNING' : spinPhase === 'settled' ? 'RESULT' : 'BETS OPEN'}
+                </span>
+                <h2>
+                  {spinPhase === 'settled' && spinResult
+                    ? `${spinResult.spin} ${spinResult.color}`
+                    : spinPhase === 'spinning'
+                    ? 'No more bets'
+                    : secondsLeft != null ? `${secondsLeft}s to place a bet` : 'Opening the table…'}
+                </h2>
+                <p>
+                  {spinPhase === 'settled'
+                    ? `Table respins in a few seconds — proof is on the right.`
+                    : myBet
+                    ? `Your bet: ${betLabel(myBet)} · ${(myBet.amount / 1_000_000).toLocaleString()} CNPY`
+                    : 'Pick a number or an outside bet below, then place it before the countdown ends.'}
+                </p>
+                {openError && <p className="error-copy">{openError}</p>}
+              </div>
+            </div>
+
+            <BettingTable selectedBet={selectedBet} onSelect={(type, number = 0) => betsOpen && !myBet && setSelectedBet({ type, number })} disabled={!betsOpen || Boolean(myBet)} />
+
+            <div className="rw-bet-controls">
+              <div className="control-section rw-selected-bet">
+                <span className="control-label">01 · YOUR BET</span>
+                <strong>{selectedBet ? betLabel(selectedBet) : 'None selected'}</strong>
+                <small>{roundInfo ? `${minBetWhole} – ${maxBetWhole} CNPY per bet` : 'Loading table limits…'}</small>
+              </div>
+              <div className="control-section rw-amount">
+                <span className="control-label">02 · AMOUNT (CNPY)</span>
+                <input
+                  type="number" min={minBetWhole || 1} max={maxBetWhole || undefined} step="1"
+                  value={betAmount} onChange={(event) => setBetAmount(event.target.value)}
+                  disabled={!betsOpen || Boolean(myBet)}
+                />
+              </div>
+              <div className="control-section action-control">
+                <span className="control-label">03 · PLACE BET</span>
+                {myBet ? (
+                  <button className="cx-confirmed-button" disabled><span>Bet locked in</span><b>✓</b></button>
+                ) : (
+                  <button className="cx-gold-button" onClick={handlePlaceBet} disabled={!betsOpen || phase === 'awaiting-signature' || phase === 'submitted'}>
+                    <span>{account ? 'Sign & place bet' : 'Connect FleetWallet'}</span><b>→</b>
+                  </button>
+                )}
+                <small>{walletBalance?.whole ? `Available · ${walletBalance.whole} ${walletBalance.symbol || 'CNPY'}` : 'Self-custody · approval required'}</small>
+              </div>
+            </div>
+          </div>
+
+          <div className="round-side rw-side">
+            <TxStatus phase={phase} error={error} txHash={txHash} />
+            {spinPhase === 'settled' && spinResult && myBet && (
+              <div className={`result-card ${won ? 'is-win' : ''}`}>
+                <span className="cx-eyebrow">ROUND RESULT</span>
+                <strong>{won ? 'You won' : 'No luck this spin'}</strong>
+                <p>
+                  {spinResult.spin} {spinResult.color} · {won
+                    ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.`
+                    : `Your ${betLabel(myBet)} bet did not match.`}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="cx-proof-strip">
+          <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>{proof?.commitment ? `${String(proof.commitment).slice(0, 18)}…` : 'Proof appears with the round'}</strong></span></div>
+          <div><small>ROUND</small><strong>{roundId ? `${roundId.slice(0, 12)}…` : '—'}</strong></div>
+          <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
+          <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
+          <button onClick={() => roundId && getRouletteProof(roundId).then(setProof).catch(() => null)} disabled={!roundId}>Refresh proof</button>
+        </div>
+        {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can recompute <code>sha256(seed)</code> and check it against the commitment above.</p>}
+      </div>
+    </section>
+  )
+}
+
+function legalDominoEnds(tile, ends) {
+  if (!ends) return ['none']
+  const [left, right] = ends
+  const [a, b] = tile
+  const outs = []
+  if (a === left || b === left) outs.push('left')
+  if (a === right || b === right) outs.push('right')
+  return outs
+}
+
+function DominoRoom({ account, onConnect }) {
+  const [mode, setMode] = useState('lobby') // lobby -> waiting -> playing -> settled
+  const [roundId, setRoundId] = useState(null)
+  const [roundInfo, setRoundInfo] = useState(null)
+  const [mySeat, setMySeat] = useState(null)
+  const [players, setPlayers] = useState([])
+  const [myHand, setMyHand] = useState([])
+  const [ends, setEnds] = useState(null)
+  const [turn, setTurn] = useState(null)
+  const [boneyardRemaining, setBoneyardRemaining] = useState(null)
+  const [joinInput, setJoinInput] = useState('')
+  const [phase, setPhase] = useState('idle')
+  const [error, setError] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const [selectedTile, setSelectedTile] = useState(null)
+  const [result, setResult] = useState(null)
+  const [proof, setProof] = useState(null)
+  const socketRef = useRef(null)
+
+  useEffect(() => {
+    if (mode !== 'waiting' || !roundId) return undefined
+    const id = window.setInterval(() => {
+      getDominoRound(roundId).then((status) => {
+        if (status.players.length === 2) {
+          setPlayers(status.players)
+          setMode('playing')
+        }
+      }).catch(() => null)
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [mode, roundId])
+
+  useEffect(() => {
+    if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
+    let ws
+    try {
+      ws = openDominoSocket(roundId)
+      socketRef.current = ws
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.type === 'state') {
+            if (msg.players) setPlayers(msg.players)
+            setTurn(msg.turn)
+            setEnds(msg.ends)
+            setBoneyardRemaining(msg.boneyardRemaining)
+          }
+          if (msg.type === 'move') {
+            setTurn(msg.nextTurn)
+            setEnds(msg.endsAfter)
+          }
+          if (msg.type === 'settled') {
+            setMode('settled')
+            setResult(msg)
+            getDominoProof(roundId).then(setProof).catch(() => null)
+          }
+        } catch {
+          // Ignore malformed socket frames.
+        }
+      }
+    } catch {
+      setError('Could not connect to the table socket.')
+    }
+    return () => { ws?.close(); socketRef.current = null }
+  }, [mode, roundId])
+
+  async function performJoin(rid, info) {
+    if (!account) { onConnect(); return false }
+    try {
+      setPhase('awaiting-signature')
+      const signed = await joinDominoTable({
+        roundId: rid, amount: info.entryFee, rpcUrl: info.rpcUrl, chainId: info.chainId, networkId: info.networkId,
+      })
+      setTxHash(signed?.txHash || '')
+      setPhase('submitted')
+      await registerDominoJoin(rid, account.address)
+      const hand = await getDominoHand(rid, account.address)
+      setMyHand(hand.hand)
+      setPhase('confirmed')
+      return true
+    } catch (err) {
+      if (err?.code === WALLET_METHOD_MISSING || err?.message === WALLET_METHOD_MISSING) {
+        setError('This FleetWallet build does not expose canopy_signAndSubmit for join_domino yet.')
+      } else {
+        setError(err?.message || 'Could not join the table.')
+      }
+      setPhase('round-ready')
+      return false
+    }
+  }
+
+  async function handleCreateTable() {
+    setError('')
+    try {
+      const created = await openDominoRound()
+      const rid = created.roundId
+      const info = await getDominoRoundInfo(rid)
+      const infoObj = {
+        entryFee: Number(info.entryFee), rakeBps: Number(info.rakeBps),
+        chainId: Number(info.chainId), networkId: Number(info.networkId), rpcUrl: info.rpcUrl,
+      }
+      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      const ok = await performJoin(rid, infoObj)
+      if (ok) { setMySeat(0); setPlayers([account.address]); setMode('waiting') }
+    } catch (err) {
+      setError(`Could not open a table: ${err.message}`)
+    }
+  }
+
+  async function handleJoinTable() {
+    const rid = joinInput.trim()
+    if (!rid) return
+    setError('')
+    try {
+      const info = await getDominoRoundInfo(rid)
+      const infoObj = {
+        entryFee: Number(info.entryFee), rakeBps: Number(info.rakeBps),
+        chainId: Number(info.chainId), networkId: Number(info.networkId), rpcUrl: info.rpcUrl,
+      }
+      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      const ok = await performJoin(rid, infoObj)
+      if (ok) { setMySeat(1); setMode('playing') }
+    } catch (err) {
+      setError(err?.message || 'Could not find that table.')
+    }
+  }
+
+  async function submitMove(action, tile, end) {
+    setError('')
+    try {
+      const resp = await postDominoMove(roundId, account.address, action, tile, end)
+      if (action === 'play') {
+        setMyHand((hand) => hand.filter((t) => !(t[0] === tile[0] && t[1] === tile[1])))
+      } else if (action === 'draw') {
+        const hand = await getDominoHand(roundId, account.address)
+        setMyHand(hand.hand)
+      }
+      setSelectedTile(null)
+      if (resp.settled) {
+        setMode('settled')
+        setResult(resp.settled)
+        getDominoProof(roundId).then(setProof).catch(() => null)
+      }
+    } catch (err) {
+      setError(err?.message || 'That move was not accepted.')
+    }
+  }
+
+  function handleTileClick(tile) {
+    if (mode !== 'playing' || turn !== mySeat) return
+    const outs = legalDominoEnds(tile, ends)
+    if (outs.length === 0) return
+    if (outs.length === 1) {
+      submitMove('play', tile, outs[0] === 'none' ? undefined : outs[0])
+    } else {
+      setSelectedTile(tile)
+    }
+  }
+
+  const myTurn = mode === 'playing' && turn === mySeat
+  const hasLegalPlay = myHand.some((t) => legalDominoEnds(t, ends).length > 0)
+  const opponentHandSize = 7 // face-down count is cosmetic; exact remaining count isn't exposed pre-settle
+  const myPayout = result && account ? result.payouts?.[account.address] : null
+  const won = myPayout != null && myPayout > 0
+
+  return (
+    <section className="cx-live-room dm-room" id="rooms">
+      <div className="room-ambient ambient-one" />
+      <div className="room-ambient ambient-two" />
+
+      <div className="cx-room-main">
+        <div className="cx-room-heading">
+          <div>
+            <span className="cx-eyebrow"><StatusDot online={mode !== 'lobby'} /> DOMINO · LIVE ON CANOPY</span>
+            <h1>Heads-up at the <em>table.</em></h1>
+            <p>Classic block dominoes, two players. The operator commits to a hidden seed before the table opens; the plugin only ever trusts a move log it can replay and verify itself.</p>
+          </div>
+        </div>
+
+        {mode === 'lobby' && (
+          <div className="dm-lobby">
+            <div className="control-section">
+              <span className="control-label">CREATE A TABLE</span>
+              <p>Open a new heads-up table and share its ID with an opponent.</p>
+              <button className="cx-gold-button" onClick={handleCreateTable}><span>{account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
+            </div>
+            <div className="control-section">
+              <span className="control-label">JOIN A TABLE</span>
+              <p>Paste the table ID your opponent shared with you.</p>
+              <div className="dm-join-row">
+                <input value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
+                <button className="cx-gold-button" onClick={handleJoinTable} disabled={!joinInput.trim()}><span>{account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
+              </div>
+            </div>
+            {error && <p className="error-copy">{error}</p>}
+          </div>
+        )}
+
+        {mode !== 'lobby' && (
+          <div className="cx-room-layout dm-layout">
+            <div className="cx-game-stage dm-stage">
+              <div className="dm-opponent-row">
+                <span className="cx-eyebrow">OPPONENT</span>
+                <div className="dm-hand face-down-row">
+                  {mode === 'waiting'
+                    ? <p className="dm-waiting-copy">Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                    : Array.from({ length: opponentHandSize }).map((_, index) => <DominoTile key={index} faceDown />)}
+                </div>
+              </div>
+
+              <div className="dm-board">
+                {ends == null && mode === 'playing' && <span className="dm-board-hint">Table is empty — play any tile to open it.</span>}
+                {ends != null && (
+                  <div className="dm-board-line">
+                    <span className="dm-end-label">{ends[0]}</span>
+                    <span className="dm-board-strip" />
+                    <span className="dm-end-label">{ends[1]}</span>
+                  </div>
+                )}
+                {mode === 'playing' && (
+                  <p className="dm-turn-copy">{myTurn ? 'Your turn' : "Opponent's turn"} · {boneyardRemaining ?? '—'} tiles left in the boneyard</p>
+                )}
+              </div>
+
+              <div className="dm-hand-row">
+                <span className="cx-eyebrow">YOUR HAND</span>
+                <div className="dm-hand">
+                  {myHand.map((tile, index) => (
+                    <DominoTile
+                      key={`${tile[0]}-${tile[1]}-${index}`}
+                      tile={tile}
+                      selected={selectedTile && selectedTile[0] === tile[0] && selectedTile[1] === tile[1]}
+                      disabled={!myTurn || legalDominoEnds(tile, ends).length === 0}
+                      onClick={() => handleTileClick(tile)}
+                    />
+                  ))}
+                </div>
+                {selectedTile && (
+                  <div className="dm-end-choice">
+                    <span>Play {selectedTile[0]}|{selectedTile[1]} on which end?</span>
+                    <button onClick={() => submitMove('play', selectedTile, 'left')}>Left ({ends[0]})</button>
+                    <button onClick={() => submitMove('play', selectedTile, 'right')}>Right ({ends[1]})</button>
+                  </div>
+                )}
+                {myTurn && !hasLegalPlay && (
+                  <button className="cx-gold-button dm-draw-button" onClick={() => submitMove(boneyardRemaining > 0 ? 'draw' : 'pass')}>
+                    <span>{boneyardRemaining > 0 ? 'Draw a tile' : 'Pass'}</span><b>→</b>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="round-side dm-side">
+              <TxStatus phase={phase} error={error} txHash={txHash} />
+              {mode === 'settled' && result && (
+                <div className={`result-card ${won ? 'is-win' : ''}`}>
+                  <span className="cx-eyebrow">ROUND RESULT</span>
+                  <strong>{won ? 'You won' : 'No luck this game'}</strong>
+                  <p>{result.reason === 'blocked' ? 'Table blocked' : 'Hand emptied'} · {won ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.` : 'Better luck at the next table.'}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {roundId && (
+          <div className="cx-proof-strip">
+            <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
+            <div><small>ENTRY</small><strong>{roundInfo ? `${(roundInfo.entryFee / 1_000_000).toLocaleString()} CNPY` : '—'}</strong></div>
+            <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
+            <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
+            <button onClick={() => getDominoProof(roundId).then(setProof).catch(() => null)}>Refresh proof</button>
+          </div>
+        )}
+        {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can replay the {proof.moves?.length || 0}-move log against it and confirm the winner themselves.</p>}
+      </div>
+    </section>
+  )
+}
+
+function PokerRoom({ account, onConnect }) {
+  const [mode, setMode] = useState('lobby') // lobby -> waiting -> playing -> settled
+  const [roundId, setRoundId] = useState(null)
+  const [roundInfo, setRoundInfo] = useState(null)
+  const [mySeat, setMySeat] = useState(null)
+  const [players, setPlayers] = useState([])
+  const [myHole, setMyHole] = useState([])
+  const [table, setTable] = useState({
+    turn: null, street: null, board: [], pot: 0,
+    streetContributed: [0, 0], stacks: [0, 0], folded: [false, false], allIn: [false, false], finished: false,
+  })
+  const [joinInput, setJoinInput] = useState('')
+  const [phase, setPhase] = useState('idle')
+  const [error, setError] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const [raiseAmount, setRaiseAmount] = useState('')
+  const [result, setResult] = useState(null)
+  const [proof, setProof] = useState(null)
+  const socketRef = useRef(null)
+
+  function applyTable(status) {
+    if (status.players) setPlayers(status.players)
+    setTable({
+      turn: status.turn ?? null, street: status.street ?? null, board: status.board || [],
+      pot: status.pot ?? 0, streetContributed: status.streetContributed || [0, 0],
+      stacks: status.stacks || [0, 0], folded: status.folded || [false, false],
+      allIn: status.allIn || [false, false], finished: Boolean(status.finished),
+    })
+  }
+
+  useEffect(() => {
+    if (mode !== 'waiting' || !roundId) return undefined
+    const id = window.setInterval(() => {
+      getPokerRound(roundId).then((status) => {
+        if (status.players.length === 2) {
+          setPlayers(status.players)
+          setMode('playing')
+        }
+      }).catch(() => null)
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [mode, roundId])
+
+  useEffect(() => {
+    if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
+    let ws
+    try {
+      ws = openPokerSocket(roundId)
+      socketRef.current = ws
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.type === 'state') {
+            if (msg.players) setPlayers(msg.players)
+            setTable((prev) => ({
+              ...prev, turn: msg.turn ?? prev.turn, street: msg.street ?? prev.street,
+              board: msg.board || prev.board, pot: msg.pot ?? prev.pot, stacks: msg.stacks || prev.stacks,
+            }))
+          }
+          if (msg.type === 'action') {
+            // The broadcast carries just enough for a live turn indicator;
+            // the authoritative streetContributed/stacks/folded snapshot
+            // (needed for the call-amount and stack display) is re-fetched
+            // right after, same trust model as Domino re-fetching a hand
+            // after a draw.
+            getPokerRound(roundId).then(applyTable).catch(() => null)
+          }
+          if (msg.type === 'settled') {
+            setMode('settled')
+            setResult(msg)
+            getPokerProof(roundId).then(setProof).catch(() => null)
+          }
+        } catch {
+          // Ignore malformed socket frames.
+        }
+      }
+    } catch {
+      setError('Could not connect to the table socket.')
+    }
+    return () => { ws?.close(); socketRef.current = null }
+  }, [mode, roundId])
+
+  async function performJoin(rid, info) {
+    if (!account) { onConnect(); return false }
+    try {
+      setPhase('awaiting-signature')
+      const signed = await joinPokerTable({
+        roundId: rid, amount: info.buyIn, rpcUrl: info.rpcUrl, chainId: info.chainId, networkId: info.networkId,
+      })
+      setTxHash(signed?.txHash || '')
+      setPhase('submitted')
+      await registerPokerJoin(rid, account.address)
+      const hole = await getPokerHand(rid, account.address)
+      setMyHole(hole.hole)
+      setPhase('confirmed')
+      return true
+    } catch (err) {
+      if (err?.code === WALLET_METHOD_MISSING || err?.message === WALLET_METHOD_MISSING) {
+        setError('This FleetWallet build does not expose canopy_signAndSubmit for join_poker yet.')
+      } else {
+        setError(err?.message || 'Could not join the table.')
+      }
+      setPhase('round-ready')
+      return false
+    }
+  }
+
+  async function handleCreateTable() {
+    setError('')
+    try {
+      const created = await openPokerRound()
+      const rid = created.roundId
+      const info = await getPokerRoundInfo(rid)
+      const infoObj = {
+        smallBlind: Number(info.smallBlind), bigBlind: Number(info.bigBlind), buyIn: Number(info.buyIn),
+        rakeBps: Number(info.rakeBps), chainId: Number(info.chainId), networkId: Number(info.networkId),
+        rpcUrl: info.rpcUrl,
+      }
+      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      const ok = await performJoin(rid, infoObj)
+      if (ok) { setMySeat(0); setPlayers([account.address]); setMode('waiting') }
+    } catch (err) {
+      setError(`Could not open a table: ${err.message}`)
+    }
+  }
+
+  async function handleJoinTable() {
+    const rid = joinInput.trim()
+    if (!rid) return
+    setError('')
+    try {
+      const info = await getPokerRoundInfo(rid)
+      const infoObj = {
+        smallBlind: Number(info.smallBlind), bigBlind: Number(info.bigBlind), buyIn: Number(info.buyIn),
+        rakeBps: Number(info.rakeBps), chainId: Number(info.chainId), networkId: Number(info.networkId),
+        rpcUrl: info.rpcUrl,
+      }
+      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      const ok = await performJoin(rid, infoObj)
+      if (ok) { setMySeat(1); setMode('playing') }
+    } catch (err) {
+      setError(err?.message || 'Could not find that table.')
+    }
+  }
+
+  async function submitAction(action, amount = 0) {
+    setError('')
+    try {
+      const resp = await postPokerAction(roundId, account.address, action, amount)
+      getPokerRound(roundId).then(applyTable).catch(() => null)
+      if (resp.settled) {
+        setMode('settled')
+        setResult(resp.settled)
+        getPokerProof(roundId).then(setProof).catch(() => null)
+      }
+    } catch (err) {
+      setError(err?.message || 'That action was not accepted.')
+    }
+  }
+
+  function handleRaiseSubmit(event) {
+    event.preventDefault()
+    const amount = Math.round(Number(raiseAmount) * 1_000_000)
+    if (!Number.isFinite(amount) || amount <= 0) { setError('Enter a valid raise amount.'); return }
+    submitAction('bet_raise', amount)
+  }
+
+  const oppSeat = mySeat === 0 ? 1 : 0
+  const myTurn = mode === 'playing' && table.turn === mySeat
+  const maxStreetContributed = Math.max(...table.streetContributed)
+  const toCall = mySeat != null ? Math.max(0, maxStreetContributed - (table.streetContributed[mySeat] || 0)) : 0
+  const suggestedRaiseTo = roundInfo ? (maxStreetContributed + roundInfo.bigBlind) / 1_000_000 : ''
+  const myPayout = result && account ? result.payouts?.[account.address] : null
+  const won = myPayout != null && myPayout > 0
+
+  return (
+    <section className="cx-live-room pk-room" id="rooms">
+      <div className="room-ambient ambient-one" />
+      <div className="room-ambient ambient-two" />
+
+      <div className="cx-room-main">
+        <div className="cx-room-heading">
+          <div>
+            <span className="cx-eyebrow"><StatusDot online={mode !== 'lobby'} /> POKER · LIVE ON CANOPY</span>
+            <h1>Heads-up <em>No-Limit.</em></h1>
+            <p>The operator commits to a hidden seed before the table opens; the plugin only ever trusts a betting-action log it can replay and verify itself, all the way to the showdown.</p>
+          </div>
+        </div>
+
+        {mode === 'lobby' && (
+          <div className="dm-lobby">
+            <div className="control-section">
+              <span className="control-label">CREATE A TABLE</span>
+              <p>Open a new heads-up table and share its ID with an opponent.</p>
+              <button className="cx-gold-button" onClick={handleCreateTable}><span>{account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
+            </div>
+            <div className="control-section">
+              <span className="control-label">JOIN A TABLE</span>
+              <p>Paste the table ID your opponent shared with you.</p>
+              <div className="dm-join-row">
+                <input value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
+                <button className="cx-gold-button" onClick={handleJoinTable} disabled={!joinInput.trim()}><span>{account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
+              </div>
+            </div>
+            {error && <p className="error-copy">{error}</p>}
+          </div>
+        )}
+
+        {mode !== 'lobby' && (
+          <div className="cx-room-layout pk-layout">
+            <div className="cx-game-stage pk-stage">
+              <div className="pk-opponent-row">
+                <span className="cx-eyebrow">OPPONENT{table.folded[oppSeat] ? ' · FOLDED' : table.allIn[oppSeat] ? ' · ALL-IN' : ''}</span>
+                <div className="pk-hand">
+                  {mode === 'waiting'
+                    ? <p className="dm-waiting-copy">Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                    : <><PlayingCard faceDown /><PlayingCard faceDown /></>}
+                </div>
+                {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[oppSeat])} CNPY</strong>}
+              </div>
+
+              <div className="pk-board">
+                <span className="pk-street-label">{mode === 'settled' ? 'SHOWDOWN' : (table.street || 'PREFLOP').toUpperCase()}</span>
+                <div className="pk-board-cards">
+                  {Array.from({ length: 5 }).map((_, index) => (
+                    <PlayingCard key={index} card={table.board[index]} faceDown={!table.board[index]} />
+                  ))}
+                </div>
+                <strong className="pk-pot">Pot · {cnpy(table.pot)} CNPY</strong>
+                {mode === 'playing' && <p className="dm-turn-copy">{myTurn ? 'Your turn' : "Opponent's turn"}</p>}
+              </div>
+
+              <div className="pk-hand-row">
+                <span className="cx-eyebrow">YOUR HAND</span>
+                <div className="pk-hand">
+                  {myHole.map((card, index) => <PlayingCard key={index} card={card} />)}
+                </div>
+                {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[mySeat])} CNPY</strong>}
+                {myTurn && !table.finished && (
+                  <div className="pk-actions">
+                    <button className="pk-action-fold" onClick={() => submitAction('fold')}>Fold</button>
+                    <button className="pk-action-call" onClick={() => submitAction('check_call')}>
+                      {toCall > 0 ? `Call ${cnpy(toCall)}` : 'Check'}
+                    </button>
+                    <form className="pk-raise-form" onSubmit={handleRaiseSubmit}>
+                      <input
+                        type="number" min="0" step="0.000001" placeholder={String(suggestedRaiseTo)}
+                        value={raiseAmount} onChange={(event) => setRaiseAmount(event.target.value)}
+                      />
+                      <button type="submit" className="pk-action-raise">{toCall > 0 ? 'Raise to' : 'Bet'}</button>
+                    </form>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="round-side pk-side">
+              <TxStatus phase={phase} error={error} txHash={txHash} />
+              {mode === 'settled' && result && (
+                <div className={`result-card ${won ? 'is-win' : ''}`}>
+                  <span className="cx-eyebrow">HAND RESULT</span>
+                  <strong>{won ? 'You won' : 'No luck this hand'}</strong>
+                  <p>{result.reason === 'fold' ? 'Opponent folded' : 'Showdown'} · {won ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.` : 'Better cards next hand.'}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {roundId && (
+          <div className="cx-proof-strip">
+            <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
+            <div><small>BLINDS</small><strong>{roundInfo ? `${cnpy(roundInfo.smallBlind)}/${cnpy(roundInfo.bigBlind)}` : '—'}</strong></div>
+            <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
+            <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
+            <button onClick={() => getPokerProof(roundId).then(setProof).catch(() => null)}>Refresh proof</button>
+          </div>
+        )}
+        {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can replay the {proof.actions?.length || 0}-action log against it and confirm the winner themselves.</p>}
+      </div>
+    </section>
+  )
+}
+
 function Home({ onPlay }) {
   return (
     <>
@@ -693,8 +1710,8 @@ export default function Experience() {
   }
 
   function play(game) {
-    if (game.id !== 'bingo') return
-    setView('bingo')
+    if (!['bingo', 'roulette', 'domino', 'poker'].includes(game.id)) return
+    setView(game.id)
     setActive('rooms')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -722,7 +1739,7 @@ export default function Experience() {
         <header className="cx-header">
           <button className="mobile-brand" onClick={() => navigate('home')}><Logo /></button>
           <div className="desktop-header-brand"><Logo /></div>
-          <div className="cx-header-center"><button className={view === 'casino' ? 'active' : ''} onClick={() => navigate('home')}>Casino</button><button className={view === 'bingo' ? 'active' : ''} onClick={() => play(games[0])}>Bingo Live <StatusDot /></button><button onClick={() => navigate('fairness')}>Fairness</button></div>
+          <div className="cx-header-center"><button className={view === 'casino' ? 'active' : ''} onClick={() => navigate('home')}>Casino</button><button className={view === 'bingo' ? 'active' : ''} onClick={() => play(games[0])}>Bingo Live <StatusDot /></button><button className={view === 'roulette' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'roulette'))}>Roulette Live <StatusDot /></button><button className={view === 'domino' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'domino'))}>Domino Live <StatusDot /></button><button className={view === 'poker' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'poker'))}>Poker Live <StatusDot /></button><button onClick={() => navigate('fairness')}>Fairness</button></div>
           <WalletButton account={account} balance={balance} onConnect={connect} onDisconnect={disconnect} connecting={walletState === 'connecting'} />
         </header>
 
@@ -731,6 +1748,12 @@ export default function Experience() {
         <main>
           {view === 'bingo' ? (
             <LiveRoom account={account} onConnect={connect} walletBalance={balance} />
+          ) : view === 'roulette' ? (
+            <RouletteRoom account={account} onConnect={connect} walletBalance={balance} />
+          ) : view === 'domino' ? (
+            <DominoRoom account={account} onConnect={connect} />
+          ) : view === 'poker' ? (
+            <PokerRoom account={account} onConnect={connect} />
           ) : (
             <>
               <Home onPlay={play} />
