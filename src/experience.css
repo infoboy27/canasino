@@ -521,6 +521,79 @@ a { color: inherit; text-decoration: none; }
   .cx-proof-strip > div:nth-child(3) { border-right:0; }
 }
 
+/* ---------------------------------------------------------------------- */
+/* Roulette: wheel + betting table                                        */
+/* ---------------------------------------------------------------------- */
+
+.rw-stage-top { display:grid; grid-template-columns:260px 1fr; align-items:center; gap:26px; padding:26px 32px; border-bottom:1px solid var(--cx-line); }
+
+.rw-wheel-wrap { width:240px; height:240px; position:relative; display:grid; place-items:center; justify-self:center; }
+.rw-pointer { position:absolute; top:2px; left:50%; transform:translateX(-50%); width:0; height:0; border-left:7px solid transparent; border-right:7px solid transparent; border-top:11px solid var(--cx-gold-soft); z-index:3; filter:drop-shadow(0 2px 6px rgba(212,175,55,.4)); }
+.rw-disc { width:220px; height:220px; border-radius:50%; position:relative; border:6px solid rgba(212,175,55,.4); box-shadow:0 22px 50px rgba(0,0,0,.45), inset 0 0 0 2px rgba(0,0,0,.35); }
+.rw-pocket-label { position:absolute; top:50%; left:50%; width:16px; margin:-6px 0 0 -8px; text-align:center; font-size:7px; line-height:1; font-weight:700; letter-spacing:-.02em; color:#d7ddd8; pointer-events:none; }
+.rw-pocket-label.red { color:#f3b3a8; }
+.rw-pocket-label.black { color:#aab3ac; }
+.rw-pocket-label.green { color:#bfe8a6; }
+.rw-hub { position:absolute; width:78px; height:78px; border-radius:50%; z-index:2; display:grid; place-items:center; background:radial-gradient(circle at 34% 25%, #23281f, #101410 70%); border:1px solid rgba(255,255,255,.08); box-shadow:inset 0 0 0 1px rgba(0,0,0,.4), 0 8px 20px rgba(0,0,0,.4); }
+.rw-hub strong { font:700 30px/1 'Fraunces', serif; color:var(--cx-muted); }
+.rw-hub.has-result.red strong { color:#e28577; }
+.rw-hub.has-result.black strong { color:#c7cfc8; }
+.rw-hub.has-result.green strong { color:var(--cx-green-soft); }
+
+.rw-status-copy h2 { margin:8px 0 6px; font:600 26px/1.15 'Fraunces', serif; color:var(--cx-cream); text-transform:capitalize; }
+.rw-status-copy p { margin:0; color:#808881; font-size:11px; line-height:1.6; max-width:480px; }
+.rw-status-copy .error-copy { color:#cf8179; font-size:10px; margin-top:8px; }
+
+.rw-table { padding:24px 30px 8px; }
+.rw-grid { display:grid; grid-template-columns:56px 1fr; gap:4px; }
+.rw-grid > .rw-cell.zero { grid-row:1/-1; height:auto; writing-mode:vertical-rl; text-orientation:mixed; font-size:15px; }
+.rw-grid-body { display:grid; gap:4px; }
+.rw-grid-row { display:grid; grid-template-columns:repeat(12, 1fr) 52px; gap:4px; }
+.rw-cell { border:1px solid rgba(255,255,255,.07); background:rgba(255,255,255,.02); color:#c7cdc8; height:40px; border-radius:7px; font:600 12px/1 'DM Sans', sans-serif; cursor:pointer; transition:.15s ease; }
+.rw-cell:hover:not(:disabled) { border-color:rgba(119,213,61,.35); color:var(--cx-cream); transform:translateY(-1px); }
+.rw-cell:disabled { cursor:not-allowed; opacity:.55; }
+.rw-cell.red { background:linear-gradient(155deg, #7a2b25, #4c1712); border-color:rgba(255,255,255,.05); color:#f2d9d4; }
+.rw-cell.black { background:linear-gradient(155deg, #22271f, #101310); border-color:rgba(255,255,255,.06); color:#dfe4e0; }
+.rw-cell.zero { background:linear-gradient(155deg, #1f6b3b, #123a20); color:#e3f4e6; }
+.rw-cell.selected { outline:2px solid var(--cx-gold-soft); outline-offset:-2px; box-shadow:0 0 0 4px rgba(212,175,55,.16); }
+.rw-cell.rw-col-bet { color:#8c948d; font-size:9px; letter-spacing:.04em; }
+.rw-outside { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; margin-top:4px; }
+.rw-outside-even { grid-template-columns:repeat(6,1fr); }
+.rw-outside .rw-cell { height:36px; font-size:10px; letter-spacing:.03em; }
+.rw-table.is-disabled .rw-cell { opacity:.5; }
+
+.rw-bet-controls { display:grid; grid-template-columns:minmax(0,1.3fr) .8fr 1fr; gap:10px; padding:18px 30px 26px; }
+.rw-selected-bet strong { display:block; font:600 17px 'Fraunces', serif; color:var(--cx-gold-soft); margin-bottom:4px; }
+.rw-selected-bet small { color:#616a62; font-size:8px; }
+.rw-amount input { width:100%; height:38px; border-radius:9px; border:1px solid var(--cx-line); background:#111512; color:var(--cx-cream); font:600 15px 'Fraunces', serif; padding:0 12px; box-sizing:border-box; }
+.rw-amount input:disabled { opacity:.45; }
+.rw-amount input:focus { outline:none; border-color:rgba(119,213,61,.4); }
+
+.rw-seed-reveal { margin:12px 2px 0; font-size:9px; color:#6d766e; line-height:1.6; }
+.rw-seed-reveal code { color:#9aa39c; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; word-break:break-all; }
+
+@media (max-width: 1100px) {
+  .rw-layout { grid-template-columns:minmax(0,1fr) 270px; }
+}
+
+@media (max-width: 860px) {
+  .rw-layout { grid-template-columns:1fr; }
+}
+
+@media (max-width: 620px) {
+  .rw-stage-top { grid-template-columns:1fr; text-align:center; padding:22px 16px; }
+  .rw-wheel-wrap { width:200px; height:200px; }
+  .rw-disc { width:184px; height:184px; }
+  .rw-pocket-label { transform:none !important; display:none; }
+  .rw-hub { width:64px; height:64px; }
+  .rw-hub strong { font-size:24px; }
+  .rw-table { padding:18px 12px 4px; }
+  .rw-grid { grid-template-columns:40px 1fr; }
+  .rw-grid-row { grid-template-columns:repeat(12,1fr) 34px; }
+  .rw-cell { height:32px; font-size:10px; }
+  .rw-bet-controls { grid-template-columns:1fr; padding:14px 16px 22px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; transition-duration:.01ms!important; }
 }
