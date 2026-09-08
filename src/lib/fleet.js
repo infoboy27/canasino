@@ -136,6 +136,29 @@ export async function joinDominoTable({ roundId, amount, rpcUrl, chainId, networ
   })
 }
 
+export async function joinPokerTable({ roundId, amount, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'join_poker',
+    typeUrl: 'type.googleapis.com/types.MessageJoinPoker',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+      { number: 3, type: 'uint64', value: amount },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Join Canasino Poker table',
+      lines: [
+        { label: 'Table', value: `${roundId.slice(0, 8)}…` },
+        { label: 'Buy-in', value: `${(amount / 1_000_000).toLocaleString()} CNPY` },
+      ],
+    },
+  })
+}
+
 export async function placeRouletteBet({ roundId, betType, betNumber, amount, rpcUrl, chainId, networkId }) {
   return canopySignAndSubmit({
     messageName: 'roulette_bet',

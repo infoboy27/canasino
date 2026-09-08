@@ -7,6 +7,7 @@ import {
   hasFleet,
   joinBingoRound,
   joinDominoTable,
+  joinPokerTable,
   placeRouletteBet,
   restoreFleet,
   waitForFleet,
@@ -40,12 +41,22 @@ import {
   postDominoMove,
   registerDominoJoin,
 } from './lib/domino'
+import {
+  getPokerHand,
+  getPokerProof,
+  getPokerRound,
+  getPokerRoundInfo,
+  openPokerRound,
+  openPokerSocket,
+  postPokerAction,
+  registerPokerJoin,
+} from './lib/poker'
 import { IconBracket, IconBroadcast, IconChip, IconCoinLoop, IconGithub, IconHome, IconLaurel, IconShieldCheck, IconSparkle, IconStarBadge } from './lib/icons'
 import './experience.css'
 
 const games = [
   { id: 'bingo', name: 'Bingo', category: 'Social', glyph: 'B', live: true, players: 'Live rooms', description: 'Community rooms, verifiable draws and on-chain settlement.' },
-  { id: 'poker', name: 'Poker', category: 'Table', glyph: '♠', live: false, players: 'Coming soon', description: 'Competitive tables with transparent pots and tournament play.' },
+  { id: 'poker', name: 'Poker', category: 'Table', glyph: '♠', live: true, players: 'Heads-up', description: 'Heads-up No-Limit Hold’em, settled on-chain from a replayed betting-action log.' },
   { id: 'domino', name: 'Domino', category: 'Social', glyph: '••', live: true, players: 'Heads-up', description: 'Classic block dominoes, two players, settled on-chain from a replayed move log.' },
   { id: 'pool', name: 'Pool', category: 'Skill', glyph: '8', live: false, players: 'Coming soon', description: 'Head-to-head skill matches with escrowed stakes.' },
   { id: 'roulette', name: 'Roulette', category: 'Table', glyph: '0', live: true, players: 'Live wheel', description: 'European single-zero wheel, commit-reveal spin, settled on-chain.' },
@@ -367,6 +378,20 @@ function DominoTile({ tile, faceDown = false, orientation = 'horizontal', select
     >
       <DominoPips value={low} /><i /><DominoPips value={high} />
     </button>
+  )
+}
+
+const SUIT_SYMBOL = { s: '♠', h: '♥', d: '♦', c: '♣' }
+
+function PlayingCard({ card, faceDown = false }) {
+  if (faceDown || !card) return <div className="pk-card face-down" />
+  const [rank, suit] = card
+  const red = suit === 'h' || suit === 'd'
+  return (
+    <div className={`pk-card ${red ? 'red' : 'black'}`}>
+      <span className="pk-card-rank">{rank}</span>
+      <span className="pk-card-suit">{SUIT_SYMBOL[suit] || suit}</span>
+    </div>
   )
 }
 
@@ -1257,6 +1282,290 @@ function DominoRoom({ account, onConnect }) {
   )
 }
 
+function PokerRoom({ account, onConnect }) {
+  const [mode, setMode] = useState('lobby') // lobby -> waiting -> playing -> settled
+  const [roundId, setRoundId] = useState(null)
+  const [roundInfo, setRoundInfo] = useState(null)
+  const [mySeat, setMySeat] = useState(null)
+  const [players, setPlayers] = useState([])
+  const [myHole, setMyHole] = useState([])
+  const [table, setTable] = useState({
+    turn: null, street: null, board: [], pot: 0,
+    streetContributed: [0, 0], stacks: [0, 0], folded: [false, false], allIn: [false, false], finished: false,
+  })
+  const [joinInput, setJoinInput] = useState('')
+  const [phase, setPhase] = useState('idle')
+  const [error, setError] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const [raiseAmount, setRaiseAmount] = useState('')
+  const [result, setResult] = useState(null)
+  const [proof, setProof] = useState(null)
+  const socketRef = useRef(null)
+
+  function applyTable(status) {
+    if (status.players) setPlayers(status.players)
+    setTable({
+      turn: status.turn ?? null, street: status.street ?? null, board: status.board || [],
+      pot: status.pot ?? 0, streetContributed: status.streetContributed || [0, 0],
+      stacks: status.stacks || [0, 0], folded: status.folded || [false, false],
+      allIn: status.allIn || [false, false], finished: Boolean(status.finished),
+    })
+  }
+
+  useEffect(() => {
+    if (mode !== 'waiting' || !roundId) return undefined
+    const id = window.setInterval(() => {
+      getPokerRound(roundId).then((status) => {
+        if (status.players.length === 2) {
+          setPlayers(status.players)
+          setMode('playing')
+        }
+      }).catch(() => null)
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [mode, roundId])
+
+  useEffect(() => {
+    if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
+    let ws
+    try {
+      ws = openPokerSocket(roundId)
+      socketRef.current = ws
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.type === 'state') {
+            if (msg.players) setPlayers(msg.players)
+            setTable((prev) => ({
+              ...prev, turn: msg.turn ?? prev.turn, street: msg.street ?? prev.street,
+              board: msg.board || prev.board, pot: msg.pot ?? prev.pot, stacks: msg.stacks || prev.stacks,
+            }))
+          }
+          if (msg.type === 'action') {
+            // The broadcast carries just enough for a live turn indicator;
+            // the authoritative streetContributed/stacks/folded snapshot
+            // (needed for the call-amount and stack display) is re-fetched
+            // right after, same trust model as Domino re-fetching a hand
+            // after a draw.
+            getPokerRound(roundId).then(applyTable).catch(() => null)
+          }
+          if (msg.type === 'settled') {
+            setMode('settled')
+            setResult(msg)
+            getPokerProof(roundId).then(setProof).catch(() => null)
+          }
+        } catch {
+          // Ignore malformed socket frames.
+        }
+      }
+    } catch {
+      setError('Could not connect to the table socket.')
+    }
+    return () => { ws?.close(); socketRef.current = null }
+  }, [mode, roundId])
+
+  async function performJoin(rid, info) {
+    if (!account) { onConnect(); return false }
+    try {
+      setPhase('awaiting-signature')
+      const signed = await joinPokerTable({
+        roundId: rid, amount: info.buyIn, rpcUrl: info.rpcUrl, chainId: info.chainId, networkId: info.networkId,
+      })
+      setTxHash(signed?.txHash || '')
+      setPhase('submitted')
+      await registerPokerJoin(rid, account.address)
+      const hole = await getPokerHand(rid, account.address)
+      setMyHole(hole.hole)
+      setPhase('confirmed')
+      return true
+    } catch (err) {
+      if (err?.code === WALLET_METHOD_MISSING || err?.message === WALLET_METHOD_MISSING) {
+        setError('This FleetWallet build does not expose canopy_signAndSubmit for join_poker yet.')
+      } else {
+        setError(err?.message || 'Could not join the table.')
+      }
+      setPhase('round-ready')
+      return false
+    }
+  }
+
+  async function handleCreateTable() {
+    setError('')
+    try {
+      const created = await openPokerRound()
+      const rid = created.roundId
+      const info = await getPokerRoundInfo(rid)
+      const infoObj = {
+        smallBlind: Number(info.smallBlind), bigBlind: Number(info.bigBlind), buyIn: Number(info.buyIn),
+        rakeBps: Number(info.rakeBps), chainId: Number(info.chainId), networkId: Number(info.networkId),
+        rpcUrl: info.rpcUrl,
+      }
+      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      const ok = await performJoin(rid, infoObj)
+      if (ok) { setMySeat(0); setPlayers([account.address]); setMode('waiting') }
+    } catch (err) {
+      setError(`Could not open a table: ${err.message}`)
+    }
+  }
+
+  async function handleJoinTable() {
+    const rid = joinInput.trim()
+    if (!rid) return
+    setError('')
+    try {
+      const info = await getPokerRoundInfo(rid)
+      const infoObj = {
+        smallBlind: Number(info.smallBlind), bigBlind: Number(info.bigBlind), buyIn: Number(info.buyIn),
+        rakeBps: Number(info.rakeBps), chainId: Number(info.chainId), networkId: Number(info.networkId),
+        rpcUrl: info.rpcUrl,
+      }
+      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      const ok = await performJoin(rid, infoObj)
+      if (ok) { setMySeat(1); setMode('playing') }
+    } catch (err) {
+      setError(err?.message || 'Could not find that table.')
+    }
+  }
+
+  async function submitAction(action, amount = 0) {
+    setError('')
+    try {
+      const resp = await postPokerAction(roundId, account.address, action, amount)
+      getPokerRound(roundId).then(applyTable).catch(() => null)
+      if (resp.settled) {
+        setMode('settled')
+        setResult(resp.settled)
+        getPokerProof(roundId).then(setProof).catch(() => null)
+      }
+    } catch (err) {
+      setError(err?.message || 'That action was not accepted.')
+    }
+  }
+
+  function handleRaiseSubmit(event) {
+    event.preventDefault()
+    const amount = Math.round(Number(raiseAmount) * 1_000_000)
+    if (!Number.isFinite(amount) || amount <= 0) { setError('Enter a valid raise amount.'); return }
+    submitAction('bet_raise', amount)
+  }
+
+  const oppSeat = mySeat === 0 ? 1 : 0
+  const myTurn = mode === 'playing' && table.turn === mySeat
+  const maxStreetContributed = Math.max(...table.streetContributed)
+  const toCall = mySeat != null ? Math.max(0, maxStreetContributed - (table.streetContributed[mySeat] || 0)) : 0
+  const suggestedRaiseTo = roundInfo ? (maxStreetContributed + roundInfo.bigBlind) / 1_000_000 : ''
+  const myPayout = result && account ? result.payouts?.[account.address] : null
+  const won = myPayout != null && myPayout > 0
+
+  return (
+    <section className="cx-live-room pk-room" id="rooms">
+      <div className="room-ambient ambient-one" />
+      <div className="room-ambient ambient-two" />
+
+      <div className="cx-room-main">
+        <div className="cx-room-heading">
+          <div>
+            <span className="cx-eyebrow"><StatusDot online={mode !== 'lobby'} /> POKER · LIVE ON CANOPY</span>
+            <h1>Heads-up <em>No-Limit.</em></h1>
+            <p>The operator commits to a hidden seed before the table opens; the plugin only ever trusts a betting-action log it can replay and verify itself, all the way to the showdown.</p>
+          </div>
+        </div>
+
+        {mode === 'lobby' && (
+          <div className="dm-lobby">
+            <div className="control-section">
+              <span className="control-label">CREATE A TABLE</span>
+              <p>Open a new heads-up table and share its ID with an opponent.</p>
+              <button className="cx-gold-button" onClick={handleCreateTable}><span>{account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
+            </div>
+            <div className="control-section">
+              <span className="control-label">JOIN A TABLE</span>
+              <p>Paste the table ID your opponent shared with you.</p>
+              <div className="dm-join-row">
+                <input value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
+                <button className="cx-gold-button" onClick={handleJoinTable} disabled={!joinInput.trim()}><span>{account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
+              </div>
+            </div>
+            {error && <p className="error-copy">{error}</p>}
+          </div>
+        )}
+
+        {mode !== 'lobby' && (
+          <div className="cx-room-layout pk-layout">
+            <div className="cx-game-stage pk-stage">
+              <div className="pk-opponent-row">
+                <span className="cx-eyebrow">OPPONENT{table.folded[oppSeat] ? ' · FOLDED' : table.allIn[oppSeat] ? ' · ALL-IN' : ''}</span>
+                <div className="pk-hand">
+                  {mode === 'waiting'
+                    ? <p className="dm-waiting-copy">Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                    : <><PlayingCard faceDown /><PlayingCard faceDown /></>}
+                </div>
+                {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[oppSeat])} CNPY</strong>}
+              </div>
+
+              <div className="pk-board">
+                <span className="pk-street-label">{mode === 'settled' ? 'SHOWDOWN' : (table.street || 'PREFLOP').toUpperCase()}</span>
+                <div className="pk-board-cards">
+                  {Array.from({ length: 5 }).map((_, index) => (
+                    <PlayingCard key={index} card={table.board[index]} faceDown={!table.board[index]} />
+                  ))}
+                </div>
+                <strong className="pk-pot">Pot · {cnpy(table.pot)} CNPY</strong>
+                {mode === 'playing' && <p className="dm-turn-copy">{myTurn ? 'Your turn' : "Opponent's turn"}</p>}
+              </div>
+
+              <div className="pk-hand-row">
+                <span className="cx-eyebrow">YOUR HAND</span>
+                <div className="pk-hand">
+                  {myHole.map((card, index) => <PlayingCard key={index} card={card} />)}
+                </div>
+                {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[mySeat])} CNPY</strong>}
+                {myTurn && !table.finished && (
+                  <div className="pk-actions">
+                    <button className="pk-action-fold" onClick={() => submitAction('fold')}>Fold</button>
+                    <button className="pk-action-call" onClick={() => submitAction('check_call')}>
+                      {toCall > 0 ? `Call ${cnpy(toCall)}` : 'Check'}
+                    </button>
+                    <form className="pk-raise-form" onSubmit={handleRaiseSubmit}>
+                      <input
+                        type="number" min="0" step="0.000001" placeholder={String(suggestedRaiseTo)}
+                        value={raiseAmount} onChange={(event) => setRaiseAmount(event.target.value)}
+                      />
+                      <button type="submit" className="pk-action-raise">{toCall > 0 ? 'Raise to' : 'Bet'}</button>
+                    </form>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="round-side pk-side">
+              <TxStatus phase={phase} error={error} txHash={txHash} />
+              {mode === 'settled' && result && (
+                <div className={`result-card ${won ? 'is-win' : ''}`}>
+                  <span className="cx-eyebrow">HAND RESULT</span>
+                  <strong>{won ? 'You won' : 'No luck this hand'}</strong>
+                  <p>{result.reason === 'fold' ? 'Opponent folded' : 'Showdown'} · {won ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.` : 'Better cards next hand.'}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {roundId && (
+          <div className="cx-proof-strip">
+            <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
+            <div><small>BLINDS</small><strong>{roundInfo ? `${cnpy(roundInfo.smallBlind)}/${cnpy(roundInfo.bigBlind)}` : '—'}</strong></div>
+            <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
+            <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
+            <button onClick={() => getPokerProof(roundId).then(setProof).catch(() => null)}>Refresh proof</button>
+          </div>
+        )}
+        {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can replay the {proof.actions?.length || 0}-action log against it and confirm the winner themselves.</p>}
+      </div>
+    </section>
+  )
+}
+
 function Home({ onPlay }) {
   return (
     <>
@@ -1401,7 +1710,7 @@ export default function Experience() {
   }
 
   function play(game) {
-    if (!['bingo', 'roulette', 'domino'].includes(game.id)) return
+    if (!['bingo', 'roulette', 'domino', 'poker'].includes(game.id)) return
     setView(game.id)
     setActive('rooms')
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -1430,7 +1739,7 @@ export default function Experience() {
         <header className="cx-header">
           <button className="mobile-brand" onClick={() => navigate('home')}><Logo /></button>
           <div className="desktop-header-brand"><Logo /></div>
-          <div className="cx-header-center"><button className={view === 'casino' ? 'active' : ''} onClick={() => navigate('home')}>Casino</button><button className={view === 'bingo' ? 'active' : ''} onClick={() => play(games[0])}>Bingo Live <StatusDot /></button><button className={view === 'roulette' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'roulette'))}>Roulette Live <StatusDot /></button><button className={view === 'domino' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'domino'))}>Domino Live <StatusDot /></button><button onClick={() => navigate('fairness')}>Fairness</button></div>
+          <div className="cx-header-center"><button className={view === 'casino' ? 'active' : ''} onClick={() => navigate('home')}>Casino</button><button className={view === 'bingo' ? 'active' : ''} onClick={() => play(games[0])}>Bingo Live <StatusDot /></button><button className={view === 'roulette' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'roulette'))}>Roulette Live <StatusDot /></button><button className={view === 'domino' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'domino'))}>Domino Live <StatusDot /></button><button className={view === 'poker' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'poker'))}>Poker Live <StatusDot /></button><button onClick={() => navigate('fairness')}>Fairness</button></div>
           <WalletButton account={account} balance={balance} onConnect={connect} onDisconnect={disconnect} connecting={walletState === 'connecting'} />
         </header>
 
@@ -1443,6 +1752,8 @@ export default function Experience() {
             <RouletteRoom account={account} onConnect={connect} walletBalance={balance} />
           ) : view === 'domino' ? (
             <DominoRoom account={account} onConnect={connect} />
+          ) : view === 'poker' ? (
+            <PokerRoom account={account} onConnect={connect} />
           ) : (
             <>
               <Home onPlay={play} />
