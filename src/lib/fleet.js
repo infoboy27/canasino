@@ -113,6 +113,29 @@ export async function joinBingoRound({ roundId, numCards, amount, rpcUrl, chainI
   })
 }
 
+export async function joinDominoTable({ roundId, amount, rpcUrl, chainId, networkId }) {
+  return canopySignAndSubmit({
+    messageName: 'join_domino',
+    typeUrl: 'type.googleapis.com/types.MessageJoinDomino',
+    fields: [
+      { number: 1, type: 'bytes', fromSigner: true },
+      { number: 2, type: 'bytes', value: roundId },
+      { number: 3, type: 'uint64', value: amount },
+    ],
+    rpcUrl,
+    chainId,
+    networkId,
+    fee: 10000,
+    display: {
+      title: 'Join Canasino Domino table',
+      lines: [
+        { label: 'Table', value: `${roundId.slice(0, 8)}…` },
+        { label: 'Stake', value: `${(amount / 1_000_000).toLocaleString()} CNPY` },
+      ],
+    },
+  })
+}
+
 export async function placeRouletteBet({ roundId, betType, betNumber, amount, rpcUrl, chainId, networkId }) {
   return canopySignAndSubmit({
     messageName: 'roulette_bet',

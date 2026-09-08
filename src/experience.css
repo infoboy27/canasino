@@ -594,6 +594,62 @@ a { color: inherit; text-decoration: none; }
   .rw-bet-controls { grid-template-columns:1fr; padding:14px 16px 22px; }
 }
 
+/* ---------------------------------------------------------------------- */
+/* Domino: heads-up table + tiles                                          */
+/* ---------------------------------------------------------------------- */
+
+.dm-lobby { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
+.dm-lobby .control-section { min-height:150px; display:grid; align-content:start; gap:10px; }
+.dm-lobby .control-section p { margin:0; color:#808881; font-size:11px; line-height:1.6; }
+.dm-join-row { display:flex; gap:8px; }
+.dm-join-row input { flex:1; height:42px; border-radius:9px; border:1px solid var(--cx-line); background:#111512; color:var(--cx-cream); padding:0 12px; font-size:12px; }
+.dm-join-row input:focus { outline:none; border-color:rgba(119,213,61,.4); }
+.dm-join-row .cx-gold-button { min-width:0; }
+
+.dm-stage { padding:26px 30px; display:grid; gap:22px; }
+.dm-opponent-row, .dm-hand-row { display:grid; gap:10px; }
+.dm-hand { display:flex; flex-wrap:wrap; gap:8px; min-height:64px; align-items:center; }
+.dm-waiting-copy { margin:0; color:#808881; font-size:12px; }
+.dm-waiting-copy code { color:#9aa39c; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+
+.dm-tile { border:1px solid rgba(255,255,255,.1); border-radius:8px; background:linear-gradient(160deg,#1d221e,#101410); padding:8px 6px; display:flex; align-items:center; gap:6px; cursor:pointer; transition:.15s ease; }
+.dm-tile:hover:not(:disabled) { border-color:rgba(119,213,61,.35); transform:translateY(-2px); }
+.dm-tile:disabled { cursor:not-allowed; opacity:.4; }
+.dm-tile.selected { outline:2px solid var(--cx-gold-soft); outline-offset:-2px; box-shadow:0 0 0 4px rgba(212,175,55,.16); }
+.dm-tile i { width:1px; align-self:stretch; background:rgba(255,255,255,.12); font-style:normal; }
+.dm-tile.face-down { width:46px; height:64px; background:linear-gradient(155deg,#1f6b3b,#123a20); border-color:rgba(255,255,255,.08); cursor:default; padding:0; }
+
+.dm-pips { width:26px; height:26px; display:grid; grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(3,1fr); gap:1px; place-items:center; }
+.dm-pips span { width:5px; height:5px; border-radius:50%; background:transparent; }
+.dm-pips span.on { background:var(--cx-cream); }
+
+.dm-board { border:1px solid var(--cx-line); border-radius:12px; background:rgba(255,255,255,.015); padding:18px; display:grid; gap:8px; place-items:center; min-height:90px; }
+.dm-board-hint { margin:0; color:#616a62; font-size:11px; }
+.dm-board-line { display:flex; align-items:center; gap:10px; }
+.dm-end-label { width:38px; height:38px; border-radius:50%; border:1px solid rgba(212,175,55,.35); background:rgba(212,175,55,.08); color:var(--cx-gold-soft); font:700 15px 'Fraunces',serif; display:grid; place-items:center; }
+.dm-board-strip { width:120px; height:2px; background:repeating-linear-gradient(90deg,rgba(255,255,255,.18) 0 6px,transparent 6px 12px); }
+.dm-turn-copy { margin:0; color:#9aa39c; font-size:11px; }
+
+.dm-end-choice { display:flex; align-items:center; gap:8px; font-size:11px; color:#9aa39c; }
+.dm-end-choice button { border:1px solid rgba(119,213,61,.3); background:rgba(119,213,61,.08); color:var(--cx-green-soft); border-radius:7px; padding:7px 11px; cursor:pointer; font-size:11px; }
+.dm-draw-button { min-width:0; width:auto; height:38px; padding:0 16px; }
+
+@media (max-width: 1100px) {
+  .dm-layout { grid-template-columns:minmax(0,1fr) 270px; }
+}
+
+@media (max-width: 860px) {
+  .dm-layout { grid-template-columns:1fr; }
+  .dm-lobby { grid-template-columns:1fr; }
+}
+
+@media (max-width: 620px) {
+  .dm-stage { padding:18px 16px; }
+  .dm-tile { padding:6px 4px; }
+  .dm-tile.face-down { width:38px; height:54px; }
+  .dm-pips { width:22px; height:22px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; transition-duration:.01ms!important; }
 }
