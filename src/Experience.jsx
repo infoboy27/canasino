@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
+import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
 import {
   connectFleet,
   disconnectFleet,
@@ -55,24 +57,25 @@ import { IconBracket, IconBroadcast, IconChip, IconCoinLoop, IconGithub, IconHom
 import './experience.css'
 
 const games = [
-  { id: 'bingo', name: 'Bingo', category: 'Social', glyph: 'B', live: true, players: 'Live rooms', description: 'Community rooms, verifiable draws and on-chain settlement.' },
-  { id: 'poker', name: 'Poker', category: 'Table', glyph: '♠', live: true, players: 'Heads-up', description: 'Heads-up No-Limit Hold’em, settled on-chain from a replayed betting-action log.' },
-  { id: 'domino', name: 'Domino', category: 'Social', glyph: '••', live: true, players: 'Heads-up', description: 'Classic block dominoes, two players, settled on-chain from a replayed move log.' },
+  { id: 'bingo', name: 'Bingo', category: 'Social', glyph: 'B', live: true, players: 'Table preview', description: 'Preview the community-room interface and its proposed proof flow.' },
+  { id: 'poker', name: 'Poker', category: 'Table', glyph: '♠', live: true, players: 'Heads-up preview', description: 'Preview heads-up Hold’em and its replayable betting-action design.' },
+  { id: 'domino', name: 'Domino', category: 'Social', glyph: '••', live: true, players: 'Heads-up preview', description: 'Preview two-player block dominoes and its replayable move-log design.' },
   { id: 'pool', name: 'Pool', category: 'Skill', glyph: '8', live: false, players: 'Coming soon', description: 'Head-to-head skill matches with escrowed stakes.' },
-  { id: 'roulette', name: 'Roulette', category: 'Table', glyph: '0', live: true, players: 'Live wheel', description: 'European single-zero wheel, commit-reveal spin, settled on-chain.' },
+  { id: 'roulette', name: 'Roulette', category: 'Table', glyph: '0', live: true, players: 'Wheel preview', description: 'Preview a European single-zero wheel and proposed commit-reveal flow.' },
   { id: 'crash', name: 'Crash', category: 'Originals', glyph: '↗', live: false, players: 'Coming soon', description: 'A fast Canasino Original built around transparent settlement.' },
 ]
 
+/** @type {[string, typeof IconHome, string][]} */
 const nav = [
   ['home', IconHome, 'Casino'],
   ['games', IconChip, 'Games'],
-  ['rooms', IconBroadcast, 'Live rooms'],
+  ['rooms', IconBroadcast, 'Table previews'],
   ['fairness', IconShieldCheck, 'Provably Fair'],
   ['rewards', IconLaurel, 'Rewards'],
 ]
 
 const starterMessages = [
-  { id: 'system-1', type: 'system', user: 'Canasino', text: 'Room chat opens when a live Bingo round is created.' },
+  { id: 'system-1', type: 'system', user: 'Canasino', text: 'Room chat remains offline while wagering is paused.' },
 ]
 
 // The chain accepts MessageExpireRoom (refund) only after the room's real
@@ -119,8 +122,7 @@ function shortAddress(address = '') {
 }
 
 function cnpy(raw) {
-  const value = Number(raw || 0) / 1_000_000
-  return Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '0'
+  try { return formatTokens(raw ?? 0) } catch { return 'Unavailable' }
 }
 
 function timeLabel() {
@@ -162,13 +164,13 @@ function GameCard({ game, onPlay }) {
       <div className="cx-game-card-body">
         <div className="cx-game-card-topline">
           <span>{game.category}</span>
-          <span className={game.live ? 'live-label' : 'soon-label'}>{game.live ? <><StatusDot /> LIVE</> : 'COMING SOON'}</span>
+          <span className={game.live ? 'live-label' : 'soon-label'}>{game.live ? <><StatusDot online={!WAGERING_PAUSED} /> {WAGERING_PAUSED ? 'PREVIEW' : 'LIVE'}</> : 'COMING SOON'}</span>
         </div>
         <h3>{game.name}</h3>
         <p>{game.description}</p>
         <div className="cx-game-card-foot">
           <small>{game.players}</small>
-          <button className={game.live ? 'cx-icon-button active' : 'cx-icon-button'} disabled={!game.live} onClick={() => game.live && onPlay(game)} aria-label={game.live ? `Play ${game.name}` : `${game.name} coming soon`}>→</button>
+          <button className={game.live ? 'cx-icon-button active' : 'cx-icon-button'} disabled={!game.live} onClick={() => game.live && onPlay(game)} aria-label={game.live ? `Explore ${game.name} preview` : `${game.name} coming soon`}>→</button>
         </div>
       </div>
     </article>
@@ -179,10 +181,10 @@ function WalletButton({ account, balance, onConnect, onDisconnect, connecting })
   if (account) {
     return (
       <div className="cx-wallet-connected">
-        <button className="cx-balance-button" onClick={onDisconnect} title="Disconnect FleetWallet">
+        <button className="cx-balance-button" onClick={onDisconnect} title="Disconnect FleetWallet" aria-label={`Disconnect wallet ${shortAddress(account.address)}`}>
           <span className="wallet-orb" />
           <span><small>{balance?.whole ? `${balance.whole} ${balance.symbol || 'CNPY'}` : 'FleetWallet'}</small><strong>{shortAddress(account.address)}</strong></span>
-          <b>⌄</b>
+          <b aria-hidden="true">×</b>
         </button>
       </div>
     )
@@ -202,8 +204,8 @@ function TxStatus({ phase, error, txHash }) {
   const current = phases.findIndex(([id]) => id === phase)
 
   return (
-    <div className="cx-tx-state">
-      <div className="tx-state-head"><span>ON-CHAIN ENTRY</span>{txHash && <small title={txHash}>{txHash.slice(0, 10)}…</small>}</div>
+    <div className="cx-tx-state" aria-live="polite" aria-atomic="true">
+      <div className="tx-state-head"><span>{WAGERING_PAUSED ? 'TRANSACTION FLOW · DISABLED' : 'ON-CHAIN ENTRY'}</span>{txHash && <small title={txHash}>{txHash.slice(0, 10)}…</small>}</div>
       <div className="tx-steps">
         {phases.slice(1).map(([id, label], index) => {
           const phaseIndex = index + 1
@@ -214,8 +216,8 @@ function TxStatus({ phase, error, txHash }) {
       </div>
       {phase === 'awaiting-signature' && <p>Approve the room entry inside FleetWallet. Canasino never receives your private key.</p>}
       {phase === 'submitted' && <p>The signed transaction was submitted. The game server is verifying your on-chain registration.</p>}
-      {phase === 'confirmed' && <p className="success-copy">Entry verified. Your cards are loaded and the live draw can begin.</p>}
-      {error && <p className="error-copy">{error}</p>}
+      {phase === 'confirmed' && <p className="success-copy">Entry registered by the game service. Follow the table for the result and settlement.</p>}
+      {error && <p className="error-copy" role="alert">{error}</p>}
     </div>
   )
 }
@@ -225,7 +227,7 @@ function BingoCard({ card = [], balls = [] }) {
     return (
       <div className="cx-card-placeholder">
         <div className="placeholder-grid">{Array.from({ length: 25 }).map((_, index) => <span key={index} />)}</div>
-        <strong>Your verified card appears after entry</strong>
+        <strong>Your card appears after a confirmed entry</strong>
         <p>Numbers come from the game server only after the wallet-signed join is registered.</p>
       </div>
     )
@@ -241,7 +243,7 @@ function BingoCard({ card = [], balls = [] }) {
         {matrix.flat().slice(0, 25).map((number, index) => {
           const free = index === 12
           const hit = free || flatBalls.has(Number(number))
-          return <span className={hit ? 'hit' : ''} key={`${number}-${index}`}>{free ? '★' : number}</span>
+          return <span role="img" aria-label={free ? 'Free space, marked' : `${number}${hit ? ', marked' : ''}`} className={hit ? 'hit' : ''} key={`${number}-${index}`}>{free ? '★' : number}</span>
         })}
       </div>
     </div>
@@ -306,37 +308,38 @@ function RouletteWheel({ spinPhase, spinNumber }) {
 
 function BettingTable({ selectedBet, onSelect, disabled }) {
   const isSelected = (type, number) => selectedBet?.type === type && (type !== 'straight' || selectedBet?.number === number)
-  const cellClass = (type, number) => `rw-cell ${type === 'straight' ? colorOf(number) : ''} ${isSelected(type, number) ? 'selected' : ''}`
+  const cellClass = (type, number) => `rw-cell ${type === 'straight' ? (number === 0 ? 'zero' : colorOf(number)) : ''} ${isSelected(type, number) ? 'selected' : ''}`
 
   return (
     <div className={`rw-table ${disabled ? 'is-disabled' : ''}`}>
+      <p className="rw-scroll-hint">Swipe horizontally to inspect the full table.</p>
       <div className="rw-grid">
-        <button type="button" className={cellClass('straight', 0)} onClick={() => onSelect('straight', 0)} disabled={disabled}>0</button>
+        <button type="button" className={cellClass('straight', 0)} aria-label="Straight 0" aria-pressed={isSelected('straight', 0)} onClick={() => onSelect('straight', 0)} disabled={disabled}>0</button>
         <div className="rw-grid-body">
           {TABLE_ROWS.map((row) => (
             <div className="rw-grid-row" key={row.bet}>
               {row.numbers.map((number) => (
-                <button type="button" key={number} className={cellClass('straight', number)} onClick={() => onSelect('straight', number)} disabled={disabled}>
+                <button type="button" key={number} className={cellClass('straight', number)} aria-label={`Straight ${number}`} aria-pressed={isSelected('straight', number)} onClick={() => onSelect('straight', number)} disabled={disabled}>
                   {number}
                 </button>
               ))}
-              <button type="button" className={`rw-cell rw-col-bet ${isSelected(row.bet) ? 'selected' : ''}`} onClick={() => onSelect(row.bet)} disabled={disabled}>2:1</button>
+              <button type="button" className={`rw-cell rw-col-bet ${isSelected(row.bet) ? 'selected' : ''}`} aria-label={`Column ${row.bet.slice(-1)}, pays 2 to 1`} aria-pressed={isSelected(row.bet)} onClick={() => onSelect(row.bet)} disabled={disabled}>2:1</button>
             </div>
           ))}
         </div>
       </div>
       <div className="rw-outside">
-        <button type="button" className={`rw-cell ${isSelected('dozen1') ? 'selected' : ''}`} onClick={() => onSelect('dozen1')} disabled={disabled}>1st 12</button>
-        <button type="button" className={`rw-cell ${isSelected('dozen2') ? 'selected' : ''}`} onClick={() => onSelect('dozen2')} disabled={disabled}>2nd 12</button>
-        <button type="button" className={`rw-cell ${isSelected('dozen3') ? 'selected' : ''}`} onClick={() => onSelect('dozen3')} disabled={disabled}>3rd 12</button>
+        <button type="button" className={`rw-cell ${isSelected('dozen1') ? 'selected' : ''}`} aria-pressed={isSelected('dozen1')} onClick={() => onSelect('dozen1')} disabled={disabled}>1st 12</button>
+        <button type="button" className={`rw-cell ${isSelected('dozen2') ? 'selected' : ''}`} aria-pressed={isSelected('dozen2')} onClick={() => onSelect('dozen2')} disabled={disabled}>2nd 12</button>
+        <button type="button" className={`rw-cell ${isSelected('dozen3') ? 'selected' : ''}`} aria-pressed={isSelected('dozen3')} onClick={() => onSelect('dozen3')} disabled={disabled}>3rd 12</button>
       </div>
       <div className="rw-outside rw-outside-even">
-        <button type="button" className={`rw-cell ${isSelected('low') ? 'selected' : ''}`} onClick={() => onSelect('low')} disabled={disabled}>1–18</button>
-        <button type="button" className={`rw-cell ${isSelected('even') ? 'selected' : ''}`} onClick={() => onSelect('even')} disabled={disabled}>Even</button>
-        <button type="button" className={`rw-cell red ${isSelected('red') ? 'selected' : ''}`} onClick={() => onSelect('red')} disabled={disabled}>Red</button>
-        <button type="button" className={`rw-cell black ${isSelected('black') ? 'selected' : ''}`} onClick={() => onSelect('black')} disabled={disabled}>Black</button>
-        <button type="button" className={`rw-cell ${isSelected('odd') ? 'selected' : ''}`} onClick={() => onSelect('odd')} disabled={disabled}>Odd</button>
-        <button type="button" className={`rw-cell ${isSelected('high') ? 'selected' : ''}`} onClick={() => onSelect('high')} disabled={disabled}>19–36</button>
+        <button type="button" className={`rw-cell ${isSelected('low') ? 'selected' : ''}`} aria-pressed={isSelected('low')} onClick={() => onSelect('low')} disabled={disabled}>1–18</button>
+        <button type="button" className={`rw-cell ${isSelected('even') ? 'selected' : ''}`} aria-pressed={isSelected('even')} onClick={() => onSelect('even')} disabled={disabled}>Even</button>
+        <button type="button" className={`rw-cell red ${isSelected('red') ? 'selected' : ''}`} aria-pressed={isSelected('red')} onClick={() => onSelect('red')} disabled={disabled}>Red</button>
+        <button type="button" className={`rw-cell black ${isSelected('black') ? 'selected' : ''}`} aria-pressed={isSelected('black')} onClick={() => onSelect('black')} disabled={disabled}>Black</button>
+        <button type="button" className={`rw-cell ${isSelected('odd') ? 'selected' : ''}`} aria-pressed={isSelected('odd')} onClick={() => onSelect('odd')} disabled={disabled}>Odd</button>
+        <button type="button" className={`rw-cell ${isSelected('high') ? 'selected' : ''}`} aria-pressed={isSelected('high')} onClick={() => onSelect('high')} disabled={disabled}>19–36</button>
       </div>
     </div>
   )
@@ -366,13 +369,15 @@ function DominoPips({ value }) {
   )
 }
 
-function DominoTile({ tile, faceDown = false, orientation = 'horizontal', selected = false, disabled = false, onClick }) {
+function DominoTile({ tile = null, faceDown = false, orientation = 'horizontal', selected = false, disabled = false, onClick = () => {} }) {
   if (faceDown) return <div className={`dm-tile face-down ${orientation}`} />
   const [low, high] = tile
   return (
     <button
       type="button"
       className={`dm-tile ${orientation} ${selected ? 'selected' : ''}`}
+      aria-label={`Domino ${low} and ${high}`}
+      aria-pressed={Boolean(selected)}
       disabled={disabled}
       onClick={onClick}
     >
@@ -383,26 +388,26 @@ function DominoTile({ tile, faceDown = false, orientation = 'horizontal', select
 
 const SUIT_SYMBOL = { s: '♠', h: '♥', d: '♦', c: '♣' }
 
-function PlayingCard({ card, faceDown = false }) {
-  if (faceDown || !card) return <div className="pk-card face-down" />
+function PlayingCard({ card = null, faceDown = false }) {
+  if (faceDown || !card) return <div className="pk-card face-down" role="img" aria-label="Face-down playing card" />
   const [rank, suit] = card
   const red = suit === 'h' || suit === 'd'
   return (
-    <div className={`pk-card ${red ? 'red' : 'black'}`}>
+    <div className={`pk-card ${red ? 'red' : 'black'}`} role="img" aria-label={`${rank} of ${suit}`}>
       <span className="pk-card-rank">{rank}</span>
       <span className="pk-card-suit">{SUIT_SYMBOL[suit] || suit}</span>
     </div>
   )
 }
 
-function ChatPanel({ messages, value, onChange, onSend, connected, account, mobileClose }) {
+function ChatPanel({ messages, value, onChange, onSend, connected, account, mobileClose = null, panelId = undefined }) {
   return (
-    <aside className="cx-chat-panel">
+    <aside className="cx-chat-panel" id={panelId}>
       <div className="chat-head">
         <div><StatusDot online={connected} /><span><strong>Room chat</strong><small>{connected ? 'Live channel' : 'Waiting for room'}</small></span></div>
-        {mobileClose && <button onClick={mobileClose}>×</button>}
+        {mobileClose && <button onClick={mobileClose} aria-label="Close room chat" autoFocus>×</button>}
       </div>
-      <div className="chat-messages">
+      <div className="chat-messages" role="log" aria-label="Room messages" aria-live="polite">
         {messages.map((message) => (
           <div className={`chat-message ${message.type === 'system' ? 'system' : ''}`} key={message.id}>
             <div><strong>{message.user}</strong><small>{message.time || ''}</small></div>
@@ -411,11 +416,30 @@ function ChatPanel({ messages, value, onChange, onSend, connected, account, mobi
         ))}
       </div>
       <form className="chat-compose" onSubmit={onSend}>
-        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={account ? 'Message the room…' : 'Connect wallet to chat'} disabled={!connected || !account} maxLength={240} />
+        <input aria-label="Message the room" value={value} onChange={(event) => onChange(event.target.value)} placeholder={account ? 'Message the room…' : 'Connect wallet to chat'} disabled={!connected || !account} maxLength={240} />
         <button disabled={!connected || !account || !value.trim()} aria-label="Send message">↑</button>
       </form>
     </aside>
   )
+}
+
+function MobileChatDialog({ onClose, children }) {
+  const dialogRef = useRef(null)
+  useEffect(() => {
+    const dialog = dialogRef.current
+    dialog.showModal()
+    return () => dialog.close()
+  }, [])
+  return <dialog ref={dialogRef} className="mobile-chat-sheet" aria-label="Room chat" onCancel={onClose} onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>{children}</dialog>
+}
+
+function TableIdentifier({ roundId }) {
+  return <label className="table-identifier"><span>Share this full table ID with your opponent</span><input aria-label="Full table ID" readOnly value={roundId || ''} onFocus={(event) => event.target.select()} /></label>
+}
+
+function ProofCommitment({ proof }) {
+  if (!proof?.commitment) return null
+  return <label className="table-identifier"><span>Full commitment · game-service data, not independently verified here</span><input aria-label="Full proof commitment" readOnly value={String(proof.commitment)} onFocus={(event) => event.target.select()} /></label>
 }
 
 function LiveRoom({ account, onConnect, walletBalance }) {
@@ -456,7 +480,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       .catch((err) => {
         if (!alive) return
         setRoomsState('error')
-        setError(`Live room service unavailable: ${err.message}`)
+        setError(`Game preview data unavailable: ${err.message}`)
       })
     return () => { alive = false }
   }, [])
@@ -493,8 +517,9 @@ function LiveRoom({ account, onConnect, walletBalance }) {
         try {
           const incoming = JSON.parse(event.data)
           if (incoming.type !== 'chat') return
-          setMessages((current) => [...current, {
-            id: `${Date.now()}-${Math.random()}`,
+          setMessages((current) => [...current.slice(-199), {
+            id: crypto.randomUUID(),
+            type: 'chat',
             user: incoming.user || 'Player',
             text: incoming.text || '',
             time: timeLabel(),
@@ -519,14 +544,14 @@ function LiveRoom({ account, onConnect, walletBalance }) {
 
   const amount = useMemo(() => entryCost(roundInfo?.entryFee ?? selectedRoom?.entryFee ?? 0, numCards), [roundInfo, selectedRoom, numCards])
   const latestBall = balls[balls.length - 1]
-  const canOfferRefund = round?.roundId && phase !== 'confirmed' && roundCreatedAt
+  const canOfferRefund = round?.roundId && result?.type !== 'settled' && roundCreatedAt
     && (now - roundCreatedAt) >= EXPIRE_HINT_MS
 
   useEffect(() => {
-    if (!round?.roundId || phase === 'confirmed') return undefined
+    if (!round?.roundId || result?.type === 'settled') return undefined
     const id = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(id)
-  }, [round?.roundId, phase])
+  }, [round?.roundId, result])
 
   async function handleExpireRoom() {
     if (!round?.roundId || !roundInfo?.rpcUrl) return
@@ -540,7 +565,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       setRefundTxHash(signed?.txHash || '')
       setMessages((current) => [...current, {
         id: `refund-${Date.now()}`, type: 'system', user: 'Canasino',
-        text: 'Refund submitted — escrowed entries for this room are being returned on-chain.',
+        text: 'Refund submitted. This is not confirmation: check the transaction in your wallet before retrying.',
       }])
     } catch (err) {
       setRefundError(err?.message || 'The room has not reached its refund deadline yet.')
@@ -570,10 +595,10 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       setRoundCreatedAt(Date.now())
       const info = await getRoundInfo(roundId)
       setRoundInfo({
-        entryFee: Number(info.entryFee ?? info.entry_fee ?? selectedRoom.entryFee),
-        rakeBps: Number(info.rakeBps ?? info.rake_bps ?? selectedRoom.rakeBps),
-        chainId: Number(info.chainId ?? info.chain_id),
-        networkId: Number(info.networkId ?? info.network_id),
+        entryFee: wireAmount(info.entryFee ?? info.entry_fee ?? selectedRoom.entryFee),
+        rakeBps: wireAmount(info.rakeBps ?? info.rake_bps ?? selectedRoom.rakeBps),
+        chainId: wireAmount(info.chainId ?? info.chain_id),
+        networkId: wireAmount(info.networkId ?? info.network_id),
         rpcUrl: info.rpcUrl ?? info.rpc_url,
       })
       setPhase('round-ready')
@@ -639,17 +664,17 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={roomsState === 'ready'} /> BINGO · LIVE ON CANOPY</span>
-            <h1>Enter the <em>gold room.</em></h1>
-            <p>Create a real round, sign the entry in FleetWallet, watch the draw and talk to the table without leaving the game.</p>
+            <span className="cx-eyebrow"><StatusDot online={false} /> BINGO · READ-ONLY PREVIEW</span>
+            <h1>Explore the <em>gold room.</em></h1>
+            <p>Inspect the table and wallet flow. Creating rounds, signing entries and live chat remain disabled during the security review.</p>
           </div>
         </div>
 
         <div className="cx-room-layout">
           <div className="cx-game-stage">
             <div className="stage-topbar">
-              <div><span className="table-badge"><StatusDot /> LIVE TABLE</span><strong>{selectedRoom?.name || 'Bingo room'}</strong></div>
-              <button className="mobile-chat-toggle" onClick={() => setChatOpen(true)}>Chat <span>{messages.filter((m) => m.type !== 'system').length}</span></button>
+              <div><span className="table-badge"><StatusDot online={false} /> PREVIEW TABLE</span><strong>{selectedRoom?.name || 'Bingo room'}</strong></div>
+              <button className="mobile-chat-toggle" aria-expanded={chatOpen} aria-controls="mobile-room-chat" onClick={() => setChatOpen(true)}>Chat <span>{messages.filter((m) => m.type !== 'system').length}</span></button>
             </div>
 
             <div className="ball-stage">
@@ -657,13 +682,13 @@ function LiveRoom({ account, onConnect, walletBalance }) {
                 <span className="machine-ring ring-1" />
                 <span className="machine-ring ring-2" />
                 <div className="draw-ball">
-                  {latestBall ? <><small>{latestBall.letter || ''}</small><strong>{latestBall.number}</strong></> : <><small>ROUND</small><strong>{round ? 'LIVE' : '—'}</strong></>}
+                  {latestBall ? <><small>{latestBall.letter || ''}</small><strong>{latestBall.number}</strong></> : <><small>ROUND</small><strong>{round ? 'DATA' : '—'}</strong></>}
                 </div>
               </div>
               <div className="draw-copy">
                 <span className="cx-eyebrow">CURRENT DRAW</span>
                 <h2>{latestBall ? `${latestBall.letter || ''}${latestBall.number}` : round ? 'Waiting for draw' : 'Create a room'}</h2>
-                <p>{round ? `${balls.length} balls received from the live round socket.` : 'Select a room below to open a verifiable round.'}</p>
+                <p>{round ? `${balls.length} balls reported by the round socket.` : 'Select a room below to inspect its preview.'}</p>
               </div>
               <div className="recent-balls">
                 {balls.slice(-8).reverse().map((ball, index) => <span className={index === 0 ? 'latest' : ''} key={`${ball.index ?? index}-${ball.number}`}>{ball.letter}{ball.number}</span>)}
@@ -674,7 +699,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
             <div className="player-surface">
               <div className="card-area">
                 <div className="surface-title"><span><small>YOUR CARD</small><strong>{account ? shortAddress(account.address) : 'Wallet not connected'}</strong></span>{cards.length > 1 && <b>{cards.length} cards</b>}</div>
-                <BingoCard card={cards[0]} balls={balls} />
+                {cards.length ? cards.map((card, index) => <div className="bingo-card-entry" key={index}><p className="card-number">Card {index + 1} of {cards.length}</p><BingoCard card={card} balls={balls} /></div>) : <BingoCard balls={balls} />}
               </div>
               <div className="round-side">
                 <TxStatus phase={phase} error={error} txHash={txHash} />
@@ -682,7 +707,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
                   <div className={`result-card ${result.winners?.includes(account?.address) ? 'is-win' : ''}`}>
                     <span className="cx-eyebrow">ROUND RESULT</span>
                     <strong>{result.winners?.includes(account?.address) ? 'You won' : 'Round settled'}</strong>
-                    <p>{Array.isArray(result.winners) && result.winners.length ? `${result.winners.length} winner${result.winners.length > 1 ? 's' : ''} verified.` : 'Settlement received from the live round.'}</p>
+                    <p>{Array.isArray(result.winners) && result.winners.length ? `${result.winners.length} winner${result.winners.length > 1 ? 's' : ''} reported by the game service.` : 'Settlement reported by the game service.'}</p>
                   </div>
                 )}
                 {canOfferRefund && !refundTxHash && (
@@ -712,7 +737,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
           <div className="control-section room-picker">
             <span className="control-label">01 · CHOOSE TABLE</span>
             <div className="room-options">
-              {roomsState === 'loading' && <span className="room-loading">Loading live room templates…</span>}
+              {roomsState === 'loading' && <span className="room-loading">Loading read-only room templates…</span>}
               {rooms.map((room) => (
                 <button key={room.id} className={selectedRoom?.id === room.id ? 'active' : ''} onClick={() => { setSelectedRoom(room); setRound(null); setRoundInfo(null); setPhase('idle'); setError('') }}>
                   <span>{room.emoji}</span><div><strong>{room.name}</strong><small>{cnpy(room.entryFee)} CNPY · {room.capacity || '—'} seats</small></div><i>✓</i>
@@ -724,36 +749,37 @@ function LiveRoom({ account, onConnect, walletBalance }) {
           <div className="control-section card-picker">
             <span className="control-label">02 · CARDS</span>
             <div className="counter-control">
-              <button onClick={() => setNumCards((value) => Math.max(1, value - 1))}>−</button>
+              <button aria-label="Fewer Bingo cards" onClick={() => setNumCards((value) => Math.max(1, value - 1))}>−</button>
               <span><strong>{numCards}</strong><small>{numCards === 1 ? 'card' : 'cards'}</small></span>
-              <button onClick={() => setNumCards((value) => Math.min(4, value + 1))}>+</button>
+              <button aria-label="More Bingo cards" onClick={() => setNumCards((value) => Math.min(4, value + 1))}>+</button>
             </div>
             <small className="cost-note">Entry · {cnpy(amount)} CNPY</small>
           </div>
 
           <div className="control-section action-control">
-            <span className="control-label">03 · ENTER ON-CHAIN</span>
+            <span className="control-label">03 · WAGERING</span>
             {!round ? (
-              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={!selectedRoom || roomsState !== 'ready'}><span>Create live room</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || !selectedRoom || roomsState !== 'ready'}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : 'Create room'}</span><b>→</b></button>
             ) : phase === 'confirmed' ? (
-              <button className="cx-confirmed-button" disabled><span>Entry verified</span><b>✓</b></button>
+              <button className="cx-confirmed-button" disabled><span>Entry registered</span><b>✓</b></button>
             ) : (
-              <button className="cx-gold-button" onClick={handleJoin} disabled={phase === 'awaiting-signature' || phase === 'submitted'}><span>{account ? 'Sign & join room' : 'Connect FleetWallet'}</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleJoin} disabled={WAGERING_PAUSED || phase === 'awaiting-signature' || phase === 'submitted'}><span>{account ? 'Sign & join room' : 'Connect FleetWallet'}</span><b>→</b></button>
             )}
             <small>{walletBalance?.whole ? `Available · ${walletBalance.whole} ${walletBalance.symbol || 'CNPY'}` : 'Self-custody · approval required'}</small>
           </div>
         </div>
 
         <div className="cx-proof-strip">
-          <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>{proof?.commitment ? `${String(proof.commitment).slice(0, 18)}…` : 'Proof appears with the round'}</strong></span></div>
+          <div><span className="proof-icon" aria-hidden="true">◇</span><span><small>ROUND PROOF DATA</small><strong>{proof?.commitment ? `${String(proof.commitment).slice(0, 18)}…` : 'Proof appears with the round'}</strong></span></div>
           <div><small>ROUND</small><strong>{round?.roundId ? `${round.roundId.slice(0, 12)}…` : '—'}</strong></div>
           <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
           <div><small>RAKE</small><strong>{selectedRoom?.rakeBps ? `${selectedRoom.rakeBps / 100}%` : '—'}</strong></div>
           <button onClick={() => round?.roundId && getRoundProof(round.roundId).then(setProof).catch(() => null)} disabled={!round}>Refresh proof</button>
         </div>
+        <ProofCommitment proof={proof} />
       </div>
 
-      {chatOpen && <div className="mobile-chat-sheet"><div className="mobile-chat-backdrop" onClick={() => setChatOpen(false)} /><ChatPanel messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} mobileClose={() => setChatOpen(false)} /></div>}
+      {chatOpen && <MobileChatDialog onClose={() => setChatOpen(false)}><ChatPanel panelId="mobile-room-chat" messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} mobileClose={() => setChatOpen(false)} /></MobileChatDialog>}
     </section>
   )
 }
@@ -767,7 +793,7 @@ const ROULETTE_AUTO_RESPIN_MS = 6_000
 
 function RouletteRoom({ account, onConnect, walletBalance }) {
   const [roundId, setRoundId] = useState(null)
-  const [roundMeta, setRoundMeta] = useState(null)
+  const [, setRoundMeta] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
   const [openError, setOpenError] = useState('')
   const [secondsLeft, setSecondsLeft] = useState(null)
@@ -801,14 +827,14 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
       const info = await getRouletteRoundInfo(id)
       setRoundMeta(created)
       setRoundInfo({
-        rakeBps: Number(info.rakeBps ?? created.rakeBps ?? 0),
-        minBet: Number(info.minBet ?? created.minBet ?? 0),
-        maxBet: Number(info.maxBet ?? created.maxBet ?? 0),
-        chainId: Number(info.chainId),
-        networkId: Number(info.networkId),
+        rakeBps: wireAmount(info.rakeBps ?? created.rakeBps ?? 0),
+        minBet: wireAmount(info.minBet ?? created.minBet ?? 0),
+        maxBet: wireAmount(info.maxBet ?? created.maxBet ?? 0),
+        chainId: wireAmount(info.chainId),
+        networkId: wireAmount(info.networkId),
         rpcUrl: info.rpcUrl,
       })
-      setBetAmount(String(Math.max(1, Math.round((info.minBet ?? created.minBet ?? 1_000_000) / 1_000_000))))
+      setBetAmount(formatTokens(info.minBet ?? created.minBet ?? 1_000_000))
       setPhase('round-ready')
       setRoundId(id)
     } catch (err) {
@@ -817,9 +843,8 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
   }
 
   useEffect(() => {
-    startNewRound()
+    if (!WAGERING_PAUSED) startNewRound()
     return () => window.clearTimeout(respinTimerRef.current)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -851,7 +876,6 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
     getRouletteProof(roundId).then(setProof).catch(() => null)
 
     return () => { ws?.close(); socketRef.current = null }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roundId])
 
   const betsOpen = phase !== 'idle' && spinPhase === 'waiting' && (secondsLeft == null || secondsLeft > 0)
@@ -863,7 +887,8 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
     if (!account) { onConnect(); return }
     if (!selectedBet) { setError('Choose a bet on the table first.'); return }
     if (!roundId || !roundInfo?.rpcUrl) { setError('Waiting for the wheel to open.'); return }
-    const amount = Math.round(Number(betAmount) * 1_000_000)
+    let amount
+    try { amount = parseTokens(betAmount) } catch (err) { setError(err.message); return }
     if (!Number.isFinite(amount) || amount < roundInfo.minBet || amount > roundInfo.maxBet) {
       setError(`Bet must be between ${minBetWhole} and ${maxBetWhole} CNPY.`)
       return
@@ -901,7 +926,7 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={spinPhase !== 'waiting' || Boolean(roundId)} /> ROULETTE · LIVE ON CANOPY</span>
+            <span className="cx-eyebrow"><StatusDot online={false} /> ROULETTE · READ-ONLY PREVIEW</span>
             <h1>Spin the <em>wheel.</em></h1>
             <p>European single-zero wheel. The operator commits to a hidden seed before the table opens; the spin is derived from it and only revealed at settle.</p>
           </div>
@@ -913,20 +938,20 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
               <RouletteWheel spinPhase={spinPhase} spinNumber={spinResult?.spin} />
               <div className="rw-status-copy">
                 <span className="cx-eyebrow">
-                  {spinPhase === 'spinning' ? 'SPINNING' : spinPhase === 'settled' ? 'RESULT' : 'BETS OPEN'}
+                  {WAGERING_PAUSED ? 'TABLE PREVIEW' : spinPhase === 'spinning' ? 'SPINNING' : spinPhase === 'settled' ? 'RESULT' : 'BETS OPEN'}
                 </span>
                 <h2>
-                  {spinPhase === 'settled' && spinResult
+                  {WAGERING_PAUSED ? 'Wagering paused' : spinPhase === 'settled' && spinResult
                     ? `${spinResult.spin} ${spinResult.color}`
                     : spinPhase === 'spinning'
                     ? 'No more bets'
                     : secondsLeft != null ? `${secondsLeft}s to place a bet` : 'Opening the table…'}
                 </h2>
                 <p>
-                  {spinPhase === 'settled'
+                  {WAGERING_PAUSED ? 'Explore the wheel layout. No round or transaction will be created.' : spinPhase === 'settled'
                     ? `Table respins in a few seconds — proof is on the right.`
                     : myBet
-                    ? `Your bet: ${betLabel(myBet)} · ${(myBet.amount / 1_000_000).toLocaleString()} CNPY`
+                    ? `Your bet: ${betLabel(myBet)} · ${cnpy(myBet.amount)} CNPY`
                     : 'Pick a number or an outside bet below, then place it before the countdown ends.'}
                 </p>
                 {openError && <p className="error-copy">{openError}</p>}
@@ -939,11 +964,11 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
               <div className="control-section rw-selected-bet">
                 <span className="control-label">01 · YOUR BET</span>
                 <strong>{selectedBet ? betLabel(selectedBet) : 'None selected'}</strong>
-                <small>{roundInfo ? `${minBetWhole} – ${maxBetWhole} CNPY per bet` : 'Loading table limits…'}</small>
+                <small>{roundInfo ? `${minBetWhole} – ${maxBetWhole} CNPY per bet` : 'Limits unavailable while wagering is paused.'}</small>
               </div>
               <div className="control-section rw-amount">
                 <span className="control-label">02 · AMOUNT (CNPY)</span>
-                <input
+                <input aria-label="Roulette wager in CNPY"
                   type="number" min={minBetWhole || 1} max={maxBetWhole || undefined} step="1"
                   value={betAmount} onChange={(event) => setBetAmount(event.target.value)}
                   disabled={!betsOpen || Boolean(myBet)}
@@ -954,8 +979,8 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
                 {myBet ? (
                   <button className="cx-confirmed-button" disabled><span>Bet locked in</span><b>✓</b></button>
                 ) : (
-                  <button className="cx-gold-button" onClick={handlePlaceBet} disabled={!betsOpen || phase === 'awaiting-signature' || phase === 'submitted'}>
-                    <span>{account ? 'Sign & place bet' : 'Connect FleetWallet'}</span><b>→</b>
+                  <button className="cx-gold-button" onClick={handlePlaceBet} disabled={WAGERING_PAUSED || !betsOpen || phase === 'awaiting-signature' || phase === 'submitted'}>
+                    <span>{WAGERING_PAUSED ? 'Unavailable during audit' : account ? 'Sign & place bet' : 'Connect FleetWallet'}</span><b>→</b>
                   </button>
                 )}
                 <small>{walletBalance?.whole ? `Available · ${walletBalance.whole} ${walletBalance.symbol || 'CNPY'}` : 'Self-custody · approval required'}</small>
@@ -971,7 +996,7 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
                 <strong>{won ? 'You won' : 'No luck this spin'}</strong>
                 <p>
                   {spinResult.spin} {spinResult.color} · {won
-                    ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.`
+                    ? `+${cnpy(myPayout)} CNPY net of rake.`
                     : `Your ${betLabel(myBet)} bet did not match.`}
                 </p>
               </div>
@@ -980,13 +1005,14 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
         </div>
 
         <div className="cx-proof-strip">
-          <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>{proof?.commitment ? `${String(proof.commitment).slice(0, 18)}…` : 'Proof appears with the round'}</strong></span></div>
+          <div><span className="proof-icon" aria-hidden="true">◇</span><span><small>ROUND PROOF DATA</small><strong>{proof?.commitment ? `${String(proof.commitment).slice(0, 18)}…` : 'Proof appears with the round'}</strong></span></div>
           <div><small>ROUND</small><strong>{roundId ? `${roundId.slice(0, 12)}…` : '—'}</strong></div>
           <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
           <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
           <button onClick={() => roundId && getRouletteProof(roundId).then(setProof).catch(() => null)} disabled={!roundId}>Refresh proof</button>
         </div>
-        {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can recompute <code>sha256(seed)</code> and check it against the commitment above.</p>}
+        <ProofCommitment proof={proof} />
+        {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code>. Verification requires the exact commitment encoding and outcome algorithm used by the chain.</p>}
       </div>
     </section>
   )
@@ -1007,7 +1033,7 @@ function DominoRoom({ account, onConnect }) {
   const [roundId, setRoundId] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
   const [mySeat, setMySeat] = useState(null)
-  const [players, setPlayers] = useState([])
+  const [, setPlayers] = useState([])
   const [myHand, setMyHand] = useState([])
   const [ends, setEnds] = useState(null)
   const [turn, setTurn] = useState(null)
@@ -1100,8 +1126,8 @@ function DominoRoom({ account, onConnect }) {
       const rid = created.roundId
       const info = await getDominoRoundInfo(rid)
       const infoObj = {
-        entryFee: Number(info.entryFee), rakeBps: Number(info.rakeBps),
-        chainId: Number(info.chainId), networkId: Number(info.networkId), rpcUrl: info.rpcUrl,
+        entryFee: wireAmount(info.entryFee), rakeBps: wireAmount(info.rakeBps),
+        chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId), rpcUrl: info.rpcUrl,
       }
       setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
       const ok = await performJoin(rid, infoObj)
@@ -1118,8 +1144,8 @@ function DominoRoom({ account, onConnect }) {
     try {
       const info = await getDominoRoundInfo(rid)
       const infoObj = {
-        entryFee: Number(info.entryFee), rakeBps: Number(info.rakeBps),
-        chainId: Number(info.chainId), networkId: Number(info.networkId), rpcUrl: info.rpcUrl,
+        entryFee: wireAmount(info.entryFee), rakeBps: wireAmount(info.rakeBps),
+        chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId), rpcUrl: info.rpcUrl,
       }
       setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
       const ok = await performJoin(rid, infoObj)
@@ -1175,7 +1201,7 @@ function DominoRoom({ account, onConnect }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={mode !== 'lobby'} /> DOMINO · LIVE ON CANOPY</span>
+            <span className="cx-eyebrow"><StatusDot online={false} /> DOMINO · READ-ONLY PREVIEW</span>
             <h1>Heads-up at the <em>table.</em></h1>
             <p>Classic block dominoes, two players. The operator commits to a hidden seed before the table opens; the plugin only ever trusts a move log it can replay and verify itself.</p>
           </div>
@@ -1186,14 +1212,14 @@ function DominoRoom({ account, onConnect }) {
             <div className="control-section">
               <span className="control-label">CREATE A TABLE</span>
               <p>Open a new heads-up table and share its ID with an opponent.</p>
-              <button className="cx-gold-button" onClick={handleCreateTable}><span>{account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleCreateTable} disabled={WAGERING_PAUSED}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
             </div>
             <div className="control-section">
               <span className="control-label">JOIN A TABLE</span>
               <p>Paste the table ID your opponent shared with you.</p>
               <div className="dm-join-row">
-                <input value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
-                <button className="cx-gold-button" onClick={handleJoinTable} disabled={!joinInput.trim()}><span>{account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
+                <input aria-label="Domino table ID" value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
+                <button className="cx-gold-button" onClick={handleJoinTable} disabled={WAGERING_PAUSED || !joinInput.trim()}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
               </div>
             </div>
             {error && <p className="error-copy">{error}</p>}
@@ -1260,7 +1286,7 @@ function DominoRoom({ account, onConnect }) {
                 <div className={`result-card ${won ? 'is-win' : ''}`}>
                   <span className="cx-eyebrow">ROUND RESULT</span>
                   <strong>{won ? 'You won' : 'No luck this game'}</strong>
-                  <p>{result.reason === 'blocked' ? 'Table blocked' : 'Hand emptied'} · {won ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.` : 'Better luck at the next table.'}</p>
+                  <p>{result.reason === 'blocked' ? 'Table blocked' : 'Hand emptied'} · {won ? `+${cnpy(myPayout)} CNPY net of rake.` : 'Better luck at the next table.'}</p>
                 </div>
               )}
             </div>
@@ -1269,13 +1295,15 @@ function DominoRoom({ account, onConnect }) {
 
         {roundId && (
           <div className="cx-proof-strip">
-            <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
-            <div><small>ENTRY</small><strong>{roundInfo ? `${(roundInfo.entryFee / 1_000_000).toLocaleString()} CNPY` : '—'}</strong></div>
+            <div><span className="proof-icon" aria-hidden="true">◇</span><span><small>ROUND PROOF DATA</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
+            <div><small>ENTRY</small><strong>{roundInfo ? `${cnpy(roundInfo.entryFee)} CNPY` : '—'}</strong></div>
             <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
             <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
             <button onClick={() => getDominoProof(roundId).then(setProof).catch(() => null)}>Refresh proof</button>
           </div>
         )}
+        {roundId && <TableIdentifier roundId={roundId} />}
+        <ProofCommitment proof={proof} />
         {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can replay the {proof.moves?.length || 0}-move log against it and confirm the winner themselves.</p>}
       </div>
     </section>
@@ -1287,7 +1315,7 @@ function PokerRoom({ account, onConnect }) {
   const [roundId, setRoundId] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
   const [mySeat, setMySeat] = useState(null)
-  const [players, setPlayers] = useState([])
+  const [, setPlayers] = useState([])
   const [myHole, setMyHole] = useState([])
   const [table, setTable] = useState({
     turn: null, street: null, board: [], pot: 0,
@@ -1396,8 +1424,8 @@ function PokerRoom({ account, onConnect }) {
       const rid = created.roundId
       const info = await getPokerRoundInfo(rid)
       const infoObj = {
-        smallBlind: Number(info.smallBlind), bigBlind: Number(info.bigBlind), buyIn: Number(info.buyIn),
-        rakeBps: Number(info.rakeBps), chainId: Number(info.chainId), networkId: Number(info.networkId),
+        smallBlind: wireAmount(info.smallBlind), bigBlind: wireAmount(info.bigBlind), buyIn: wireAmount(info.buyIn),
+        rakeBps: wireAmount(info.rakeBps), chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId),
         rpcUrl: info.rpcUrl,
       }
       setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
@@ -1415,8 +1443,8 @@ function PokerRoom({ account, onConnect }) {
     try {
       const info = await getPokerRoundInfo(rid)
       const infoObj = {
-        smallBlind: Number(info.smallBlind), bigBlind: Number(info.bigBlind), buyIn: Number(info.buyIn),
-        rakeBps: Number(info.rakeBps), chainId: Number(info.chainId), networkId: Number(info.networkId),
+        smallBlind: wireAmount(info.smallBlind), bigBlind: wireAmount(info.bigBlind), buyIn: wireAmount(info.buyIn),
+        rakeBps: wireAmount(info.rakeBps), chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId),
         rpcUrl: info.rpcUrl,
       }
       setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
@@ -1444,7 +1472,8 @@ function PokerRoom({ account, onConnect }) {
 
   function handleRaiseSubmit(event) {
     event.preventDefault()
-    const amount = Math.round(Number(raiseAmount) * 1_000_000)
+    let amount
+    try { amount = parseTokens(raiseAmount) } catch (err) { setError(err.message); return }
     if (!Number.isFinite(amount) || amount <= 0) { setError('Enter a valid raise amount.'); return }
     submitAction('bet_raise', amount)
   }
@@ -1465,7 +1494,7 @@ function PokerRoom({ account, onConnect }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={mode !== 'lobby'} /> POKER · LIVE ON CANOPY</span>
+            <span className="cx-eyebrow"><StatusDot online={false} /> POKER · READ-ONLY PREVIEW</span>
             <h1>Heads-up <em>No-Limit.</em></h1>
             <p>The operator commits to a hidden seed before the table opens; the plugin only ever trusts a betting-action log it can replay and verify itself, all the way to the showdown.</p>
           </div>
@@ -1476,14 +1505,14 @@ function PokerRoom({ account, onConnect }) {
             <div className="control-section">
               <span className="control-label">CREATE A TABLE</span>
               <p>Open a new heads-up table and share its ID with an opponent.</p>
-              <button className="cx-gold-button" onClick={handleCreateTable}><span>{account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleCreateTable} disabled={WAGERING_PAUSED}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : account ? 'Create table' : 'Connect FleetWallet'}</span><b>→</b></button>
             </div>
             <div className="control-section">
               <span className="control-label">JOIN A TABLE</span>
               <p>Paste the table ID your opponent shared with you.</p>
               <div className="dm-join-row">
-                <input value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
-                <button className="cx-gold-button" onClick={handleJoinTable} disabled={!joinInput.trim()}><span>{account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
+                <input aria-label="Poker table ID" value={joinInput} onChange={(event) => setJoinInput(event.target.value)} placeholder="Table ID" />
+                <button className="cx-gold-button" onClick={handleJoinTable} disabled={WAGERING_PAUSED || !joinInput.trim()}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : account ? 'Join table' : 'Connect FleetWallet'}</span><b>→</b></button>
               </div>
             </div>
             {error && <p className="error-copy">{error}</p>}
@@ -1527,7 +1556,7 @@ function PokerRoom({ account, onConnect }) {
                       {toCall > 0 ? `Call ${cnpy(toCall)}` : 'Check'}
                     </button>
                     <form className="pk-raise-form" onSubmit={handleRaiseSubmit}>
-                      <input
+                      <input aria-label="Raise total in CNPY"
                         type="number" min="0" step="0.000001" placeholder={String(suggestedRaiseTo)}
                         value={raiseAmount} onChange={(event) => setRaiseAmount(event.target.value)}
                       />
@@ -1544,7 +1573,7 @@ function PokerRoom({ account, onConnect }) {
                 <div className={`result-card ${won ? 'is-win' : ''}`}>
                   <span className="cx-eyebrow">HAND RESULT</span>
                   <strong>{won ? 'You won' : 'No luck this hand'}</strong>
-                  <p>{result.reason === 'fold' ? 'Opponent folded' : 'Showdown'} · {won ? `+${(myPayout / 1_000_000).toLocaleString()} CNPY net of rake.` : 'Better cards next hand.'}</p>
+                  <p>{result.reason === 'fold' ? 'Opponent folded' : 'Showdown'} · {won ? `+${cnpy(myPayout)} CNPY net of rake.` : 'Better cards next hand.'}</p>
                 </div>
               )}
             </div>
@@ -1553,13 +1582,15 @@ function PokerRoom({ account, onConnect }) {
 
         {roundId && (
           <div className="cx-proof-strip">
-            <div><span className="proof-icon">✓</span><span><small>PROVABLY FAIR</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
+            <div><span className="proof-icon" aria-hidden="true">◇</span><span><small>ROUND PROOF DATA</small><strong>Table {roundId.slice(0, 12)}…</strong></span></div>
             <div><small>BLINDS</small><strong>{roundInfo ? `${cnpy(roundInfo.smallBlind)}/${cnpy(roundInfo.bigBlind)}` : '—'}</strong></div>
             <div><small>CHAIN</small><strong>{roundInfo?.chainId || 'Dynamic'}</strong></div>
             <div><small>RAKE</small><strong>{roundInfo?.rakeBps ? `${roundInfo.rakeBps / 100}%` : '—'}</strong></div>
             <button onClick={() => getPokerProof(roundId).then(setProof).catch(() => null)}>Refresh proof</button>
           </div>
         )}
+        {roundId && <TableIdentifier roundId={roundId} />}
+        <ProofCommitment proof={proof} />
         {proof?.seed && <p className="rw-seed-reveal">Seed revealed: <code>{proof.seed}</code> — anyone can replay the {proof.actions?.length || 0}-action log against it and confirm the winner themselves.</p>}
       </div>
     </section>
@@ -1572,11 +1603,11 @@ function Home({ onPlay }) {
       <section className="cx-hero" id="home">
         <div className="cx-hero-glow" />
         <div className="cx-hero-content">
-          <span className="cx-eyebrow"><StatusDot /> A CANOPY ECOSYSTEM CASINO</span>
+          <span className="cx-eyebrow"><StatusDot online={false} /> CANASINO SECURITY PREVIEW</span>
           <h1>Play with the house.<br /><em>Verify the house.</em></h1>
-          <p>Canasino turns casino games into transparent on-chain experiences: self-custody entry, verifiable rounds, multiplayer rooms and settlement players can inspect.</p>
-          <div className="hero-buttons"><button className="cx-gold-button hero-button" onClick={() => onPlay(games[0])}><span>Enter Bingo Live</span><b>→</b></button><a className="cx-text-button" href="#fairness">See how fairness works <b>↗</b></a></div>
-          <div className="hero-proof-row"><span><i>✓</i> Self-custody</span><span><i>✓</i> On-chain entry</span><span><i>✓</i> Live room chat</span><span><i>✓</i> Verifiable settlement</span></div>
+          <p>Explore Canasino's table designs and proposed on-chain proof flows. Wagering remains deliberately disabled until wallet authorization and game-integrity controls are complete.</p>
+          <div className="hero-buttons"><button className="cx-gold-button hero-button" onClick={() => onPlay(games[0])}><span>Explore Bingo preview</span><b>→</b></button><a className="cx-text-button" href="#fairness">Review the proof model <b>↗</b></a></div>
+          <div className="hero-proof-row"><span><i>✓</i> Wallet-aware UI</span><span><i>✓</i> Transactions disabled</span><span><i>✓</i> Responsive tables</span><span><i>✓</i> Proof model explained</span></div>
         </div>
         <div className="cx-hero-art" aria-hidden="true">
           <div className="hero-floor" />
@@ -1584,15 +1615,15 @@ function Home({ onPlay }) {
           <div className="hero-chip chip-main"><small>CANASINO</small><strong>C</strong><span>PLAY · WIN · ON-CHAIN</span></div>
           <div className="hero-card-float float-one"><b>A</b><strong>♠</strong></div>
           <div className="hero-card-float float-two"><b>K</b><strong>♦</strong></div>
-          <div className="hero-verify"><i>✓</i><span><small>ROUND PROOF</small><strong>VERIFIABLE</strong></span></div>
+          <div className="hero-verify"><i>!</i><span><small>ROUND PROOF</small><strong>REVIEW REQUIRED</strong></span></div>
         </div>
       </section>
 
       <section className="cx-metrics">
-        <div><small>LIVE GAME</small><strong>Bingo</strong><span><StatusDot /> Available now</span></div>
-        <div><small>SETTLEMENT</small><strong>On-chain</strong><span>Canopy native</span></div>
-        <div><small>WALLET</small><strong>FleetWallet</strong><span>Self-custody signing</span></div>
-        <div><small>SOCIAL</small><strong>Room chat</strong><span>WebSocket live</span></div>
+        <div><small>TABLE PREVIEW</small><strong>Bingo</strong><span><StatusDot online={false} /> Read-only</span></div>
+        <div><small>SETTLEMENT DESIGN</small><strong>On-chain</strong><span>Verification pending</span></div>
+        <div><small>WALLET UI</small><strong>FleetWallet</strong><span>Signing disabled</span></div>
+        <div><small>SOCIAL DESIGN</small><strong>Room chat</strong><span>Connection disabled</span></div>
       </section>
     </>
   )
@@ -1600,16 +1631,16 @@ function Home({ onPlay }) {
 
 function Games({ onPlay }) {
   const [filter, setFilter] = useState('All')
-  const categories = ['All', 'Live', 'Social', 'Table', 'Originals']
-  const filtered = games.filter((game) => filter === 'All' || (filter === 'Live' ? game.live : game.category === filter))
+  const categories = ['All', 'Preview', 'Social', 'Table', 'Originals']
+  const filtered = games.filter((game) => filter === 'All' || (filter === 'Preview' ? game.live : game.category === filter))
 
   return (
     <section className="cx-games" id="games">
       <div className="cx-section-heading">
         <div><span className="cx-eyebrow">THE CANASINO FLOOR</span><h2>Games designed to feel <em>alive.</em></h2></div>
-        <p>Bingo is connected to the existing live game-server path. Future games are intentionally labeled rather than presented as fake functionality.</p>
+        <p>Explore Bingo, Poker, Domino and Roulette table previews. Wagering is paused; Pool and Crash are coming soon.</p>
       </div>
-      <div className="cx-filter-row">{categories.map((item) => <button className={filter === item ? 'active' : ''} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div>
+      <div className="cx-filter-row" role="group" aria-label="Game categories">{categories.map((item) => <button className={filter === item ? 'active' : ''} aria-pressed={filter === item} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div>
       <div className="cx-games-grid">{filtered.map((game) => <GameCard key={game.id} game={game} onPlay={onPlay} />)}</div>
     </section>
   )
@@ -1621,7 +1652,7 @@ function Fairness() {
       <div className="fairness-copy">
         <span className="cx-eyebrow">PROVABLY FAIR · PRODUCT, NOT SLOGAN</span>
         <h2>The proof belongs <em>inside the game.</em></h2>
-        <p>Canasino exposes the cryptographic lifecycle next to the round itself. Players shouldn't need to search documentation to understand whether a result can be reproduced.</p>
+        <p>Canasino is designed to expose the cryptographic lifecycle next to each round. The current preview explains that model but does not claim to verify a live result.</p>
         <div className="fairness-steps">
           <div><b>01</b><span><strong>Commit</strong><small>Round commitment is published before the result.</small></span></div>
           <div><b>02</b><span><strong>Play</strong><small>The player joins from a self-custody wallet.</small></span></div>
@@ -1630,17 +1661,18 @@ function Fairness() {
         </div>
       </div>
       <div className="proof-demo">
-        <div className="proof-demo-head"><span><i>✓</i><span><small>CANASINO</small><strong>Round verifier</strong></span></span><b>LIVE-READY UI</b></div>
-        <label><span>Commitment</span><div>7f2c8d10…b931 <button>Copy</button></div></label>
-        <div className="proof-demo-grid"><label><span>Chain</span><div>Canopy</div></label><label><span>Status</span><div className="verified-text">✓ Verified</div></label></div>
-        <div className="proof-code"><span>commitment</span><strong>matches(reveal, round)</strong><i>TRUE</i></div>
-        <p>The live Bingo room replaces these demonstration values with `/rounds/:id/proof` data.</p>
+        <div className="proof-demo-head"><span><i aria-hidden="true">◇</i><span><small>CANASINO</small><strong>How round proofs work</strong></span></span><b>EXAMPLE ONLY</b></div>
+        <label><span>Commitment</span><div>Published before play</div></label>
+        <div className="proof-demo-grid"><label><span>Chain</span><div>Canopy</div></label><label><span>Status</span><div>Not verified</div></label></div>
+        <div className="proof-code"><span>verification requires</span><strong>commitment + reveal + round</strong></div>
+        <p>This is an illustration, not a verified result. A future live room must verify the commitment, reveal, round rules and successful on-chain settlement—not merely display data from the game service.</p>
       </div>
     </section>
   )
 }
 
 function Rewards() {
+  /** @type {[typeof IconCoinLoop, string, string][]} */
   const layers = [
     [IconCoinLoop, 'Rakeback', 'Transparent rewards based on verified activity.'],
     [IconStarBadge, 'VIP', 'Progression that can follow the wallet, not a hidden account.'],
@@ -1671,42 +1703,54 @@ export default function Experience() {
   const [balance, setBalance] = useState(null)
   const [walletState, setWalletState] = useState('idle')
   const [walletNotice, setWalletNotice] = useState('')
+  const walletEpoch = useRef(0)
+  const connectingRef = useRef(false)
 
   useEffect(() => {
     let alive = true
+    const epoch = walletEpoch.current
     ;(async () => {
       await waitForFleet()
       const restored = await restoreFleet()
-      if (!alive || !restored) return
+      if (!alive || !restored || walletEpoch.current !== epoch) return
       setAccount(restored)
-      setBalance(await getFleetBalance())
+      const restoredBalance = await getFleetBalance()
+      if (alive && walletEpoch.current === epoch) setBalance(restoredBalance)
     })()
     return () => { alive = false }
   }, [])
 
   async function connect() {
+    if (connectingRef.current) return
     setWalletNotice('')
     if (!hasFleet()) {
       setWalletNotice('FleetWallet is not detected in this browser. Install or enable the extension to use self-custody play.')
       return
     }
 
+    connectingRef.current = true
+    const epoch = ++walletEpoch.current
     setWalletState('connecting')
     try {
       const next = await connectFleet()
+      if (walletEpoch.current !== epoch) return
+      if (!next) throw new Error('No wallet account was selected.')
       setAccount(next)
-      setBalance(await getFleetBalance())
+      const nextBalance = await getFleetBalance()
+      if (walletEpoch.current === epoch) setBalance(nextBalance)
     } catch (error) {
       setWalletNotice(error?.message || 'Wallet connection failed.')
     } finally {
+      connectingRef.current = false
       setWalletState('idle')
     }
   }
 
   async function disconnect() {
-    await disconnectFleet()
+    walletEpoch.current++
     setAccount(null)
     setBalance(null)
+    await disconnectFleet()
   }
 
   function play(game) {
@@ -1729,31 +1773,33 @@ export default function Experience() {
   return (
     <div className="cx-app">
       <div className="cx-noise" />
+      <a className="cx-skip-link" href="#main-content">Skip to main content</a>
       <aside className="cx-sidebar">
-        <button className="cx-logo-button" onClick={() => navigate('home')}><Logo compact /></button>
-        <nav>{nav.map(([id, Icon, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => navigate(id)} title={label}><span><Icon /></span><small>{label}</small></button>)}</nav>
-        <div className="sidebar-bottom"><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer" title="GitHub"><IconGithub /></a><button title="Responsible play">18+</button></div>
+        <button className="cx-logo-button" aria-label="Canasino home" onClick={() => navigate('home')}><Logo compact /></button>
+        <nav aria-label="Main navigation">{nav.map(([id, Icon, label]) => <button className={active === id ? 'active' : ''} aria-current={active === id ? 'page' : undefined} key={id} onClick={() => navigate(id)} title={label}><span><Icon /></span><small>{label}</small></button>)}</nav>
+        <div className="sidebar-bottom"><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer" aria-label="Canasino on GitHub" title="GitHub"><IconGithub /></a><a href="#responsible-play" title="Responsible play">18+</a></div>
       </aside>
 
       <div className="cx-page">
         <header className="cx-header">
-          <button className="mobile-brand" onClick={() => navigate('home')}><Logo /></button>
+          <button className="mobile-brand" aria-label="Canasino home" onClick={() => navigate('home')}><Logo /></button>
           <div className="desktop-header-brand"><Logo /></div>
-          <div className="cx-header-center"><button className={view === 'casino' ? 'active' : ''} onClick={() => navigate('home')}>Casino</button><button className={view === 'bingo' ? 'active' : ''} onClick={() => play(games[0])}>Bingo Live <StatusDot /></button><button className={view === 'roulette' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'roulette'))}>Roulette Live <StatusDot /></button><button className={view === 'domino' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'domino'))}>Domino Live <StatusDot /></button><button className={view === 'poker' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'poker'))}>Poker Live <StatusDot /></button><button onClick={() => navigate('fairness')}>Fairness</button></div>
+          <div className="cx-header-center"><button className={view === 'casino' ? 'active' : ''} onClick={() => navigate('home')}>Casino</button><button className={view === 'bingo' ? 'active' : ''} onClick={() => play(games[0])}>Bingo Preview <StatusDot online={false} /></button><button className={view === 'roulette' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'roulette'))}>Roulette Preview <StatusDot online={false} /></button><button className={view === 'domino' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'domino'))}>Domino Preview <StatusDot online={false} /></button><button className={view === 'poker' ? 'active' : ''} onClick={() => play(games.find((game) => game.id === 'poker'))}>Poker Preview <StatusDot online={false} /></button><button onClick={() => navigate('fairness')}>Fairness</button></div>
           <WalletButton account={account} balance={balance} onConnect={connect} onDisconnect={disconnect} connecting={walletState === 'connecting'} />
         </header>
 
-        {walletNotice && <div className="cx-wallet-notice"><span>!</span><p>{walletNotice}</p><button onClick={() => setWalletNotice('')}>×</button></div>}
+        {walletNotice && <div className="cx-wallet-notice" role="alert"><span>!</span><p>{walletNotice}</p><button aria-label="Dismiss wallet notice" onClick={() => setWalletNotice('')}>×</button></div>}
 
-        <main>
+        <main id="main-content" tabIndex={-1}>
+          {WAGERING_PAUSED && <div className="cx-safety-banner" role="status"><strong>Wagering paused · Preview available</strong><p>{PAUSE_MESSAGE}</p></div>}
           {view === 'bingo' ? (
-            <LiveRoom account={account} onConnect={connect} walletBalance={balance} />
+            <LiveRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} />
           ) : view === 'roulette' ? (
-            <RouletteRoom account={account} onConnect={connect} walletBalance={balance} />
+            <RouletteRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} />
           ) : view === 'domino' ? (
-            <DominoRoom account={account} onConnect={connect} />
+            <DominoRoom key={account?.address || 'guest'} account={account} onConnect={connect} />
           ) : view === 'poker' ? (
-            <PokerRoom account={account} onConnect={connect} />
+            <PokerRoom key={account?.address || 'guest'} account={account} onConnect={connect} />
           ) : (
             <>
               <Home onPlay={play} />
@@ -1766,11 +1812,11 @@ export default function Experience() {
 
         <footer className="cx-footer">
           <Logo />
-          <p>Canasino is a Canopy ecosystem gaming interface. Play responsibly. 18+ where applicable.</p>
-          <div><a href="#fairness">Provably Fair</a><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer">GitHub</a></div>
+          <p id="responsible-play">Canasino is a Canopy ecosystem gaming interface. Gambling can result in loss of funds. Set limits, take breaks and only play what you can afford to lose. Adults only, where permitted.</p>
+          <div><button className="footer-link" onClick={() => navigate('fairness')}>Provably Fair</button><a href="https://github.com/infoboy27/canasino" target="_blank" rel="noreferrer">GitHub</a></div>
         </footer>
 
-        <nav className="cx-mobile-nav">{nav.slice(0, 4).map(([id, Icon, label]) => <button className={active === id ? 'active' : ''} key={id} onClick={() => navigate(id)}><span><Icon /></span><small>{label}</small></button>)}</nav>
+        <nav className="cx-mobile-nav" aria-label="Mobile navigation">{nav.slice(0, 4).map(([id, Icon, label]) => <button className={active === id ? 'active' : ''} aria-current={active === id ? 'page' : undefined} key={id} onClick={() => navigate(id)}><span><Icon /></span><small>{label}</small></button>)}</nav>
       </div>
     </div>
   )

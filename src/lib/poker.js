@@ -1,71 +1,37 @@
-export const API_BASE = import.meta.env.VITE_BINGO_API_URL || 'https://bingo.jfmcss.com'
-
-function friendlyStatusMessage(status) {
-  if (status === 429) return 'Too many tables open right now. Try again in a moment.'
-  if (status === 422) return 'That action was not accepted. Refresh the table and try again.'
-  if (status >= 500) return 'The game server is having trouble right now. Try again in a moment.'
-  return null
-}
-
-function apiError(method, path, status) {
-  const err = new Error(friendlyStatusMessage(status) || `${method} ${path} -> ${status}`)
-  err.status = status
-  return err
-}
-
-async function jsonGet(path) {
-  const response = await fetch(`${API_BASE}${path}`)
-  if (!response.ok) throw apiError('GET', path, response.status)
-  return response.json()
-}
-
-async function jsonPost(path, body) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (!response.ok) throw apiError('POST', path, response.status)
-  return response.json()
-}
+import { jsonGet, jsonPost, websocket } from './api.js'
 
 export function openPokerRound() {
   return jsonPost('/poker/rounds')
 }
 
 export function joinPokerTable(roundId) {
-  return jsonPost(`/poker/rounds/${roundId}/join`)
+  return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/join`)
 }
 
 export function registerPokerJoin(roundId, address) {
-  return jsonPost(`/poker/rounds/${roundId}/register`, { address })
+  return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/register`, { address })
 }
 
 export function getPokerRoundInfo(roundId) {
-  return jsonGet(`/poker/rounds/${roundId}/info`)
+  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/info`)
 }
 
 export function getPokerRound(roundId) {
-  return jsonGet(`/poker/rounds/${roundId}`)
+  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}`)
 }
 
 export function getPokerHand(roundId, address) {
-  return jsonGet(`/poker/rounds/${roundId}/hand?address=${encodeURIComponent(address)}`)
+  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`)
 }
 
 export function postPokerAction(roundId, address, action, amount = 0) {
-  return jsonPost(`/poker/rounds/${roundId}/action`, { address, action, amount })
+  return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/action`, { address, action, amount })
 }
 
 export function getPokerProof(roundId) {
-  return jsonGet(`/poker/rounds/${roundId}/proof`)
-}
-
-function websocket(path) {
-  const wsBase = API_BASE.replace(/^http/, 'ws')
-  return new WebSocket(`${wsBase}${path}`)
+  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/proof`)
 }
 
 export function openPokerSocket(roundId) {
-  return websocket(`/ws/poker/${roundId}`)
+  return websocket(`/ws/poker/${encodeURIComponent(roundId)}`)
 }

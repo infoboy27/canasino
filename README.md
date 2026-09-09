@@ -1,111 +1,76 @@
 # Canasino
 
-Canasino is a premium on-chain casino experience for the Canopy ecosystem. The product is designed to feel like a real modern casino first—fast, social, animated and easy to understand—while making wallet approval, round state and verifiability visible instead of hiding the blockchain behind marketing copy.
+Canasino is the React interface for the Canopy casino project. This branch is deliberately **read-only for wagering** while the audit blockers in wallet authorization, settlement and crash recovery are resolved.
 
-## What is live in this branch
+## Current safety state
 
-### Premium casino shell
+`WAGERING_PAUSED=true` is the required production posture.
 
-- Dark charcoal / deep-forest visual system with gold accents
-- Responsive desktop sidebar and mobile bottom navigation
-- Animated hero and game artwork built in CSS
-- Game-category filtering and premium game cards
-- State-driven microanimations for wallet, transaction and live-round feedback
-- `prefers-reduced-motion` support
+- The browser does not create rounds, register players or open wagering WebSockets.
+- Game cards and tables are labelled as previews, not as live products.
+- FleetWallet can be detected and connected, but no wager transaction is requested.
+- The game-server hardening candidate allows only the expiry/refund lifecycle while paused.
+- Any proof shown by the interface is reported server data; it is not independently verified by the browser.
 
-### Bingo Live
+Do not remove the pause until the blocking items in [`audit/REPORT.md`](audit/REPORT.md) are implemented and independently re-tested.
 
-Bingo is the real connected game in the current Canasino floor. Poker, Domino, Pool, Roulette and Crash are intentionally labeled **Coming Soon** until their game logic exists.
+## Architecture
 
-The Bingo experience includes:
+The system spans three repositories/runtime sources:
 
-- Live room templates from the existing Bingo game server
-- 1–4 card selection with the same card-cost multipliers as Bingo Rush
-- Real round creation
-- FleetWallet connection, reconnect, balance and disconnect
-- Wallet-signed `MessageJoinRoom` through `canopy_signAndSubmit`
-- Visible transaction states: room ready → signature → submitted → confirmed
-- Server registration after the wallet-signed join
-- Real player card loading after registration
-- Live ball stream over WebSocket
-- Win/settlement state handling
-- Round proof surface
-- Real per-room WebSocket chat
-- Desktop room-chat panel and mobile chat bottom sheet
+- This repository: React/Vite frontend.
+- `infoboy27/canasino-gameserver`: FastAPI game coordinator and Canopy bridge.
+- `infoboy27/canopy`, `plugin/python`: on-chain casino state machine.
 
-## FleetWallet contract
+At audit time, production ran game-server branch `feature/roulette` at `e842785`. The active Canopy checkout was branch `development` at `cd4cd495` with local, uncommitted plugin changes. Those facts are evidence from the audit snapshot, not a promise that production still has that state.
 
-Canasino follows the FleetWallet integration contract already used by `infoboy27/BingoRushMobile`:
+## Read-only preview data
 
-- Injected provider: `window.fleet`
-- Permissions: `account`, `balance`, `tx.write`
-- Generic transaction method: `canopy_signAndSubmit`
-- Bingo message: `join_room`
-- Type URL: `type.googleapis.com/types.MessageJoinRoom`
-- Fields: signer address, round ID, number of cards and amount
-
-If the installed FleetWallet build does not expose `canopy_signAndSubmit`, Canasino stops the real-value flow and shows an explicit compatibility error instead of silently falling back to a fake transaction.
-
-## Game-server contract
-
-Default server:
+The default API is:
 
 ```text
 https://bingo.jfmcss.com
 ```
 
-Used routes:
-
-```text
-GET  /rooms
-POST /rounds
-GET  /rounds/{id}/info
-POST /rounds/{id}/register
-GET  /rounds/{id}/card?address=...&num_cards=...
-GET  /rounds/{id}/proof
-WS   /ws/rounds/{id}
-WS   /ws/rounds/{id}/chat
-```
-
-Override the server with:
+To use another read-only endpoint:
 
 ```bash
 VITE_BINGO_API_URL=https://your-bingo-server.example
 ```
 
+If the API origin changes, update the deployment Content Security Policy too. The checked-in Nginx candidate currently permits only the default origin.
+
 ## Local development
 
+Use Node.js 22:
+
 ```bash
-cp .env.example .env
-npm install
+npm ci
 npm run dev
 ```
 
-## Production build
+## Quality gates
 
 ```bash
+npm run lint
+npm run typecheck
+npm test
 npm run build
-npm run preview
+npm run test:e2e
 ```
 
-## Brand
+The end-to-end suite builds the application and serves the generated `dist` directory with Vite Preview. It covers desktop and mobile layouts but does not authorize real-value transactions.
 
-- Primary gold: `#D4AF37`
-- Gold highlight: `#EED47D`
-- Canopy green: `#77D53D`
-- Background: `#090B0B`
-- Token / ecosystem label: `CASN`
-- Tagline: `Play. Win. On-chain.`
+## Deployment candidate
 
-## Stack
+[`deploy/nginx.conf`](deploy/nginx.conf) is a hardened static-serving candidate with SPA fallback and security headers. Its presence does not prove that the live proxy is using it. Deployment remains a separate, explicitly approved step.
 
-- React
-- Vite
-- CSS
-- FleetWallet injected provider
-- FastAPI/HTTP Bingo game server integration
-- WebSocket live rounds + room chat
+## Audit artifacts
 
-## Implementation note
+- Consolidated findings and release decision: [`audit/REPORT.md`](audit/REPORT.md)
+- Reproducible cross-repository patches: `audit/patches/`
+- Representative browser evidence: `audit/screenshots/`
 
-The `infoboy27/canopy` branch named `bingo-plugin` currently has no commits ahead of `main` and is substantially behind it, so it is not treated as an additional authoritative Bingo contract. The active frontend integration is aligned to the contract already present in `BingoRushMobile`.
+## Production decision
+
+**NOT READY FOR REAL-MONEY WAGERING.** The preview frontend is usable, but wallet-bound authorization, replay protection, durable settlement reconciliation and an unbiased commit/reveal protocol remain release blockers.
