@@ -70,7 +70,37 @@ export async function jsonPublicPost(path, body, { timeoutMs = 10000 } = {}) {
   } finally { clearTimeout(timer) }
 }
 
-const WALLET_POST = /^(?:\/(?:rounds\/[a-f0-9]{16}|(?:roulette|domino|poker)\/rounds\/[a-f0-9]{16})\/register|\/domino\/rounds\/[a-f0-9]{16}\/move|\/poker\/rounds\/[a-f0-9]{16}\/action)$/i
+const WALLET_POST = /^(?:\/(?:rounds\/[a-f0-9]{16}|(?:roulette|domino|poker)\/rounds\/[a-f0-9]{16})\/register|\/domino\/rounds\/[a-f0-9]{16}\/move|\/poker\/rounds\/[a-f0-9]{16}\/action|\/(?:domino|poker)\/rounds\/[a-f0-9]{16}\/session)$/i
+const SESSION_POST = /^\/(?:domino|poker)\/rounds\/[a-f0-9]{16}\/(?:move|action)$/i
+
+// A per-table move session (one wallet signature per table) authenticates a
+// turn-based move with an HMAC over the request body instead of a fresh grant.
+export async function jsonSessionPost(path, body, sessionId, mac, { timeoutMs = 10000 } = {}) {
+  requireWagering()
+  if (!SESSION_POST.test(path) || typeof sessionId !== 'string' || sessionId.length !== 36 ||
+      !/^[a-f0-9]{64}$/i.test(mac || '')) {
+    throw new Error('Invalid session-authorized operation.')
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: 'POST', signal: controller.signal, credentials: 'omit', cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Canasino-Session ${sessionId}`,
+        'X-Canasino-Move-MAC': mac,
+      },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) throw Object.assign(new Error(statusMessage(response.status)), { status: response.status })
+    try { return await response.json() } catch { throw new Error('The game service returned an invalid response.') }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('The game service timed out. Check operation history before retrying.', { cause: error })
+    if (error instanceof TypeError) throw new Error('Could not reach the game service. Check operation history before retrying.', { cause: error })
+    throw error
+  } finally { clearTimeout(timer) }
+}
 
 export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = {}) {
   requireWagering()

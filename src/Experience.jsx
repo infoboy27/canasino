@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, PRACTICE_OPPONENT } from './lib/api.js'
+import { openMoveSession } from './lib/session.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
 import {
   connectFleet,
@@ -1231,6 +1232,9 @@ function DominoRoom({ account, onConnect }) {
         await new Promise((resolve) => setTimeout(resolve, 5000))
         await registerDominoJoin(rid, account.address, signed?.txHash)
       }
+      // One signature now authorizes every move at this table; if it's
+      // declined, moves fall back to signing individually.
+      await openMoveSession('domino', rid, account)
       // Only the second player can expect a hand right away; the creator's
       // hand is dealt later and picked up by the mode==='playing' effect.
       if (expectHand) {
@@ -1652,6 +1656,9 @@ function PokerRoom({ account, onConnect }) {
         await new Promise((resolve) => setTimeout(resolve, 5000))
         await registerPokerJoin(rid, account.address, signed?.txHash)
       }
+      // One signature now authorizes every action at this table; if it's
+      // declined, actions fall back to signing individually.
+      await openMoveSession('poker', rid, account)
       // Only the second player can expect hole cards right away; the creator's
       // are dealt later and picked up by the mode==='playing' effect.
       if (expectHand) {

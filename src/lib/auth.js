@@ -10,9 +10,15 @@ function canonicalize(value) {
   return value
 }
 
+// The exact bytes the game service hashes/MACs for a payload: keys sorted
+// recursively, no whitespace. Must stay byte-identical to the server's
+// canonical_json (json.dumps sort_keys, separators (",",":"), ensure_ascii).
+export function canonicalBytes(payload) {
+  return new TextEncoder().encode(JSON.stringify(canonicalize(payload)))
+}
+
 export async function payloadHash(payload) {
-  const bytes = new TextEncoder().encode(JSON.stringify(canonicalize(payload)))
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  const digest = await crypto.subtle.digest('SHA-256', canonicalBytes(payload))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 

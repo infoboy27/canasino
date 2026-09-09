@@ -1,5 +1,6 @@
-import { jsonGet, jsonPost, websocket } from './api.js'
+import { jsonGet, jsonPost, jsonSessionPost, websocket } from './api.js'
 import { walletAction, walletAuthorizedPost, walletOperation } from './auth.js'
+import { moveSessionAuth } from './session.js'
 
 export function openDominoRound() {
   return jsonPost('/domino/rounds')
@@ -38,14 +39,16 @@ export function getDominoHand(roundId, address) {
   return jsonGet(`/domino/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`, { operator: true })
 }
 
-export function postDominoMove(roundId, address, actionContext, action, tile, end) {
+export async function postDominoMove(roundId, address, actionContext, action, tile, end) {
   const path = `/domino/rounds/${encodeURIComponent(roundId)}/move`
-  // Only include tile/end when present -- the server hashes the grant payload
-  // with exclude_none, so a null here would not match its bound hash (401).
+  // Only include tile/end when present -- the server hashes the payload with
+  // exclude_none, so a null here would not match its bound hash/MAC (401).
   const fields = { action }
   if (tile) fields.tile = tile
   if (end) fields.end = end
   const payload = walletAction(address, actionContext, fields)
+  const auth = await moveSessionAuth(roundId, payload)
+  if (auth) return jsonSessionPost(path, payload, auth.sessionId, auth.mac)
   return walletAuthorizedPost({
     path, account: { address }, action: 'domino_move',
     resource: `domino-move:${roundId}:${payload.sequence}`, payload,
