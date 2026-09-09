@@ -643,10 +643,22 @@ function LiveRoom({ account, onConnect, walletBalance }) {
         await new Promise((resolve) => setTimeout(resolve, 5000))
         await registerRound(round.roundId, account.address, numCards, hash)
       }
-      const cardResponse = await getCard(round.roundId, account.address, numCards)
-      setCards(cardResponse.cards || [])
       setPhase('confirmed')
       getRoundProof(round.roundId).then(setProof).catch(() => null)
+
+      // Cards are dealt from the FINAL seed (revealed secret folded with the
+      // consensus entropy fixed at close), so they only exist once the round
+      // has closed and its entropy window has finalized. Poll until then.
+      for (let attempt = 0; attempt < 40; attempt++) {
+        try {
+          const cardResponse = await getCard(round.roundId, account.address, numCards)
+          setCards(cardResponse.cards || [])
+          break
+        } catch (cardErr) {
+          if (cardErr?.status !== 425) throw cardErr
+          await new Promise((resolve) => setTimeout(resolve, 3000))
+        }
+      }
     } catch (err) {
       if (err?.code === WALLET_METHOD_MISSING || err?.message === WALLET_METHOD_MISSING) {
         setError('This FleetWallet build does not expose canopy_signAndSubmit yet. Update FleetWallet before playing with real value.')
