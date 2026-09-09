@@ -73,11 +73,22 @@ export async function getFleetBalance() {
   }
 }
 
+// The one production Canasino network a player tx may target. A local valueless
+// stack additionally allows the network in VITE_CANASINO_RPC / _CHAIN_ID /
+// _NETWORK_ID; unset in every production build.
+const PROD_CANASINO_RPC = 'https://casino.val-a.grad.dev.app.canopynetwork.org/rpc'
+const LOCAL_CANASINO_RPC = String(import.meta.env?.VITE_CANASINO_RPC ?? '').trim().replace(/\/$/, '')
+const LOCAL_CANASINO_CHAIN_ID = Number(import.meta.env?.VITE_CANASINO_CHAIN_ID ?? 0)
+const LOCAL_CANASINO_NETWORK_ID = Number(import.meta.env?.VITE_CANASINO_NETWORK_ID ?? 0)
+
 export async function canopySignAndSubmit(params) {
   if (params.messageName !== 'expire_room') requireWagering()
   if (!hasFleet()) throw new Error('FleetWallet not detected')
-  const rpc = new URL(params.rpcUrl)
-  if (rpc.href.replace(/\/$/, '') !== 'https://casino.val-a.grad.dev.app.canopynetwork.org/rpc' || params.chainId !== 406 || params.networkId !== 1) throw new Error('Unrecognized Canasino network. Transaction blocked.')
+  const rpc = new URL(params.rpcUrl).href.replace(/\/$/, '')
+  const isProd = rpc === PROD_CANASINO_RPC && params.chainId === 406 && params.networkId === 1
+  const isLocal = Boolean(LOCAL_CANASINO_RPC) && rpc === LOCAL_CANASINO_RPC &&
+    params.chainId === LOCAL_CANASINO_CHAIN_ID && params.networkId === LOCAL_CANASINO_NETWORK_ID
+  if (!isProd && !isLocal) throw new Error('Unrecognized Canasino network. Transaction blocked.')
   for (const field of params.fields) {
     if (field.type === 'uint64') wireAmount(field.value)
     if (field.number === 2 && !/^[a-fA-F0-9]{16,128}$/.test(field.value)) throw new Error('Invalid round identifier')
