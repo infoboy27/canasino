@@ -491,13 +491,13 @@ function LiveRoom({ account, onConnect, walletBalance }) {
     return () => { alive = false }
   }, [])
 
+  // The round socket also *drives* the draw (close -> entropy -> balls ->
+  // settle), so only open it once this player's entry is confirmed -- opening
+  // it at room creation would close betting before anyone joined.
   useEffect(() => {
-    if (!round?.roundId) return undefined
-
+    if (!round?.roundId || phase !== 'confirmed') return undefined
     const roomId = round.roundId
     let roundWs
-    let chatWs
-
     try {
       roundWs = openRoundSocket(roomId)
       roundSocketRef.current = roundWs
@@ -505,15 +505,22 @@ function LiveRoom({ account, onConnect, walletBalance }) {
         try {
           const message = JSON.parse(event.data)
           if (message.type === 'ball') setBalls((current) => [...current, message])
-          if (message.type === 'bingo' || message.type === 'settled') {
-            setResult(message)
-            if (message.type === 'settled') setPhase('confirmed')
-          }
+          if (message.type === 'bingo' || message.type === 'settled') setResult(message)
         } catch {
           // Ignore malformed socket messages instead of breaking the game surface.
         }
       }
+    } catch {
+      // The room stays usable; the draw is also reachable via the admin path.
+    }
+    return () => { roundWs?.close(); roundSocketRef.current = null }
+  }, [round?.roundId, phase])
 
+  useEffect(() => {
+    if (!round?.roundId) return undefined
+    const roomId = round.roundId
+    let chatWs
+    try {
       chatWs = openChatSocket(roomId)
       chatSocketRef.current = chatWs
       chatWs.onopen = () => setChatConnected(true)
@@ -541,9 +548,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
     getRoundProof(roomId).then(setProof).catch(() => null)
 
     return () => {
-      roundWs?.close()
       chatWs?.close()
-      roundSocketRef.current = null
       chatSocketRef.current = null
     }
   }, [round?.roundId])
@@ -655,16 +660,18 @@ function LiveRoom({ account, onConnect, walletBalance }) {
 
       // Cards are dealt from the FINAL seed (revealed secret folded with the
       // consensus entropy fixed at close), so they only exist once the round
-      // has closed and its entropy window has finalized. Poll until then.
-      for (let attempt = 0; attempt < 40; attempt++) {
+      // has closed and its entropy window has finalized -- and the draw holds
+      // the manager lock through that wait, so a fetch here can 425 OR time
+      // out. Either way, keep polling.
+      for (let attempt = 0; attempt < 60; attempt++) {
         try {
           const cardResponse = await getCard(round.roundId, account.address, numCards)
-          setCards(cardResponse.cards || [])
-          break
-        } catch (cardErr) {
-          if (cardErr?.status !== 425) throw cardErr
-          await new Promise((resolve) => setTimeout(resolve, 3000))
-        }
+          if (Array.isArray(cardResponse.cards) && cardResponse.cards.length) {
+            setCards(cardResponse.cards)
+            break
+          }
+        } catch { /* 425 or timeout while the entropy window finalizes */ }
+        await new Promise((resolve) => setTimeout(resolve, 3000))
       }
     } catch (err) {
       if (err?.code === WALLET_METHOD_MISSING || err?.message === WALLET_METHOD_MISSING) {
@@ -931,7 +938,16 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
+      // The bet tx needs a block to be indexed before the server can verify
+      // it; give it a moment, then retry once on 425.
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      try {
+        await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
+      } catch (registerErr) {
+        if (registerErr?.status !== 425) throw registerErr
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
+      }
       setMyBet({ ...selectedBet, amount })
       setPhase('confirmed')
     } catch (err) {
