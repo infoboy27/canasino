@@ -208,11 +208,47 @@ Done and verified in containers (16-core local Docker; no host toolchain):
   `SHA256(RNG_V2_ENTROPY_DOMAIN || v[start] || ... || v[end])`, fails closed on
   any gap. `rng_v2_seed()` = `derive_seed(RNG_V2_SEED_DOMAIN, operator_secret,
   entropy, round_id)`. Plugin suite 182/182.
+- **A.4** — implemented across all four games (`b7375e72`):
+  - `tx.proto`: `operator_bond` on `MessageOpen{Room,Roulette,Domino,Poker}`;
+    new `MessageClose{Room,Roulette,Domino,Poker}` (operator + round_id);
+    `operator_bond/close_height/entropy_start/entropy_end` on each `*Round`.
+    `tx_pb2.py` regenerated with the pinned toolchain, additive-only.
+  - open escrows `operator_bond` from the operator account into a per-round,
+    per-game salted sub-account (`{bingo,roulette,domino,poker}_bond_address`);
+    `_prepare_open` also folds in the duplicate-round check.
+  - `_deliver_close_round` (shared): OPEN -> CLOSED (status 3), stamps
+    `close_height`, `entropy_start = H + ENTROPY_DELAY_BLOCKS`,
+    `entropy_end = entropy_start + ENTROPY_WINDOW_BLOCKS - 1`. Operator-only,
+    authenticated against the round record.
+  - `_settle_final_seed` (shared): requires status CLOSED and
+    `current_height > entropy_end`, folds `[entropy_start, entropy_end]` via
+    `_fold_consensus_entropy` (fail-closed on a gap), returns
+    `rng_v2_seed(revealed_secret, entropy, round_id)`. Each game's settle now
+    replays every seed-derived step (`draw_order`, `generate_cards`,
+    `spin_number`, the Domino deal, the Poker deal) from that seed; the
+    commitment check still binds the revealed secret.
+  - settle returns the bond to the operator (`_bond_move_sets`); expire slashes
+    it to the treasury. `_require_expirable` (shared) allows OPEN or CLOSED and
+    extends the deadline to `max(opened_height + ROOM_EXPIRY_BLOCKS,
+    entropy_end + SETTLE_GRACE_BLOCKS)` so a closed-but-unsettled round frees.
+  - join/bet reject `player == operator`; expire fails closed if the treasury
+    is a participant — the bond leg then never aliases a mutated account.
+  - dispatch + `CONTRACT_CONFIG` wired for the 4 close messages; no new state
+    prefix (bonds are plain accounts under `0x01`).
+- **A.5 / A.6.5** — `tests/test_fair_randomness_v2.py`: open -> join -> close ->
+  `begin_block` through and past the window -> settle, then independently
+  recompute the folded entropy, the replay seed and the Bingo outcome. Also:
+  a single changed window hash changes the seed; a missing window block fails
+  settle closed; settle is rejected before the window finalizes; join is
+  rejected after close; an unsettled closed round slashes the bond on expire.
+- **A.6.6 (partial)** — full plugin suite **196/196** in an isolated container
+  (`--network none`, Python 3.12, protobuf 4.25). The four lifecycle suites and
+  `test_audit_financial` were updated for the close step and the bond. No Go
+  changes. `audit/patches/plugin.patch` regenerated.
 
 Not started:
 
-- **A.4** — per-game `operator_bond` on open, `MessageClose<Game>` + round
-  state fields, settle rewrite to consume ledger entropy, expire rewrite to
-  slash the bond. Dispatch/config wiring. `tx.proto` regen.
-- **A.5/A.6.5** — replay test.
-- **A.6.6** — full container E2E on the isolated node.
+- **A.6.7** — game-server consumes the new `open -> close -> settle` lifecycle
+  (emit `MessageClose<Game>` after betting, settle only after `entropy_end`).
+- **A.6.6 (remainder)** — wallet -> bet -> payout E2E on the isolated Canopy
+  node. `fairRandomnessV2` stays false until both pass.
