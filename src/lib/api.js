@@ -33,6 +33,23 @@ export async function jsonGet(path, { timeoutMs = 10000, operator = false } = {}
   } finally { clearTimeout(timer) }
 }
 
+// On-chain available balance (uCNPY). Used to fail an entry before the wallet
+// signs a transaction that would be rejected on-chain for insufficient funds
+// (which otherwise surfaces only as a never-resolving "needs confirmations").
+export async function playerAvailable(address) {
+  const w = await jsonGet(`/players/${encodeURIComponent(address)}/wallet`)
+  const available = Number(w?.available)
+  return Number.isFinite(available) ? available : null
+}
+
+export async function assertCanAfford(address, needed, label = 'this entry') {
+  const available = await playerAvailable(address)
+  if (available !== null && available < needed) {
+    const short = ((needed - available) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 6 })
+    throw new Error(`Not enough CNPY for ${label}: short ${short} CNPY. Fund this wallet and try again.`)
+  }
+}
+
 const PUBLIC_POSTS = new Set(['/auth/challenges', '/auth/verify'])
 
 export async function jsonPublicPost(path, body, { timeoutMs = 10000 } = {}) {

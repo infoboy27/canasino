@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
+import { assertCanAfford } from './lib/api.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
 import {
   connectFleet,
@@ -620,6 +621,7 @@ function LiveRoom({ account, onConnect, walletBalance }) {
     }
 
     try {
+      await assertCanAfford(account.address, amount + 10000, 'this room')
       setPhase('awaiting-signature')
       const signed = await joinBingoRound({
         roundId: round.roundId,
@@ -916,6 +918,7 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
     }
 
     try {
+      await assertCanAfford(account.address, amount + 10000, 'this bet')
       setPhase('awaiting-signature')
       const signed = await placeRouletteBet({
         roundId, betType: selectedBet.type, betNumber: selectedBet.number || 0, amount,
@@ -1118,6 +1121,7 @@ function DominoRoom({ account, onConnect }) {
   async function performJoin(rid, info) {
     if (!account) { onConnect(); return false }
     try {
+      await assertCanAfford(account.address, info.entryFee + 10000, 'this table')
       setPhase('awaiting-signature')
       const signed = await joinDominoTable({
         roundId: rid, amount: info.entryFee, rpcUrl: info.rpcUrl, chainId: info.chainId, networkId: info.networkId,
@@ -1425,6 +1429,7 @@ function PokerRoom({ account, onConnect }) {
   async function performJoin(rid, info) {
     if (!account) { onConnect(); return false }
     try {
+      await assertCanAfford(account.address, info.buyIn + 10000, 'this table buy-in')
       setPhase('awaiting-signature')
       const signed = await joinPokerTable({
         roundId: rid, amount: info.buyIn, rpcUrl: info.rpcUrl, chainId: info.chainId, networkId: info.networkId,
