@@ -24,7 +24,7 @@ export function getPokerRound(roundId) {
 }
 
 export function getPokerHand(roundId, address) {
-  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`)
+  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`, { operator: true })
 }
 
 export function postPokerAction(roundId, address, actionContext, action, amount = 0) {

@@ -24,7 +24,7 @@ export function getDominoRound(roundId) {
 }
 
 export function getDominoHand(roundId, address) {
-  return jsonGet(`/domino/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`)
+  return jsonGet(`/domino/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`, { operator: true })
 }
 
 export function postDominoMove(roundId, address, actionContext, action, tile, end) {

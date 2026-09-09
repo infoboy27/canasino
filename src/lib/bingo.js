@@ -41,7 +41,7 @@ export function registerRound(roundId, address, numCards, txHash) {
 }
 
 export function getCard(roundId, address, numCards) {
-  return jsonGet(`/rounds/${encodeURIComponent(roundId)}/card?address=${encodeURIComponent(address)}&num_cards=${numCards}`)
+  return jsonGet(`/rounds/${encodeURIComponent(roundId)}/card?address=${encodeURIComponent(address)}&num_cards=${numCards}`, { operator: true })
 }
 
 export function getRoundProof(roundId) {

@@ -12,11 +12,15 @@ export function statusMessage(status) {
   return 'The game service is unavailable. Please try again later.'
 }
 
-export async function jsonGet(path, { timeoutMs = 10000 } = {}) {
+export async function jsonGet(path, { timeoutMs = 10000, operator = false } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  // The /card and /hand reveals are operator-gated (the address param is
+  // trusted). In a production build there is no browser operator token, so
+  // these stay 401 for end users; a local valueless stack sets VITE_OPERATOR_TOKEN.
+  const headers = operator && OPERATOR_TOKEN ? { Authorization: `Bearer ${OPERATOR_TOKEN}` } : undefined
   try {
-    const response = await fetch(`${API_BASE}${path}`, { signal: controller.signal, credentials: 'omit', cache: 'no-store' })
+    const response = await fetch(`${API_BASE}${path}`, { signal: controller.signal, credentials: 'omit', cache: 'no-store', headers })
     if (!response.ok) {
       const error = Object.assign(new Error(statusMessage(response.status)), { status: response.status })
       throw error
