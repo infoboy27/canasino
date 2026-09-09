@@ -1,0 +1,8 @@
+ARG CANOPY_IMAGE=canopy-python:a67
+FROM ${CANOPY_IMAGE}
+
+# This derived image exists only for the disposable, internal testnet.  The
+# corresponding private key is a public test fixture and MUST NOT be funded on
+# any other network.  The production candidate's admin allowlist is unchanged.
+RUN sed -i 's/fb70ee0f20168be6d3a98f13dcbab09b1ea18c65/fa768c3cd0f8aa09e8572f298f6a2570eefbede3/' \
+    /app/plugin/python/contract/contract.py

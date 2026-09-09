@@ -241,14 +241,42 @@ Done and verified in containers (16-core local Docker; no host toolchain):
   a single changed window hash changes the seed; a missing window block fails
   settle closed; settle is rejected before the window finalizes; join is
   rejected after close; an unsettled closed round slashes the bond on expire.
-- **A.6.6 (partial)** — full plugin suite **196/196** in an isolated container
-  (`--network none`, Python 3.12, protobuf 4.25). The four lifecycle suites and
-  `test_audit_financial` were updated for the close step and the bond. No Go
-  changes. `audit/patches/plugin.patch` regenerated.
+- **A.6.7** — game-server candidate `f8fc1d1`. Every manager drives
+  `open -> close -> wait(entropy_end + 1) -> settle`; `CanopyBridge` gained
+  `close_{room,roulette,domino,poker}` (tx hash + height), `block_hash` and
+  `wait_for_height`, and every `open_*` carries `operator_bond`
+  (`CASINO_OPERATOR_BOND`). `gameserver/fairness.py` reconstructs the plugin's
+  replay seed from public finalized blocks and **must stay byte-exact** with
+  `contract.py`:
+  - fold  = `SHA256(RNG_V2_ENTROPY_DOMAIN || h[start] || ... || h[end])`, raw;
+  - seed  = `derive_seed(RNG_V2_SEED_DOMAIN, operator_secret, fold, round_id)`,
+    where `derive_seed` **length-prefixes every part** with a 4-byte
+    big-endian length. A first cut concatenated the seed parts raw, so the
+    winner the game-server computed disagreed with the on-chain payout about
+    half the time; `derive_final_seed` now calls `engine.rng.derive_seed` and a
+    parity test + frozen known-answer vector guard the layout.
+  - Managers persist `status / close_tx_hash / close_height / entropy_start /
+    entropy_end / outcome_seed` and restore them on restart (additive db
+    migration). Bingo/Domino/Poker build their engine and reveal cards only
+    once `outcome_seed` exists, so nothing seed-derived leaks before the
+    window finalizes.
+- **A.2 (addendum)** — Canopy candidate `a113484f`: `BeginBlock` resolves the
+  one empty `LastBlockHash` case (proposal simulation runs it against a
+  skeletal header) from the FSM's indexed predecessor
+  (`LoadBlock(height-1).BlockHeader.Hash`) — still consensus-authenticated,
+  never operator/RPC-supplied. Without it the plugin fails closed on every
+  block above height 1 during proposal.
+- **A.6.6** — full plugin suite **196/196** and full game-server suite
+  **240/240** in isolated containers; `go build ./fsm ./lib` +
+  `TestBeginBlock/TestApplyBlock/TestEndBlock` green. Isolated valueless
+  testnet rebuilt (`canasino-canopy-a67-e2e:local`, 250 ms phase timers).
+  `audit/testnet/e2e_wallet_bet_payout.py` (real `MessageCloseRoulette`
+  receipt, waits the window, asserts the exact settle receipt height and the
+  plugin-computed winner's balance rise) passed **6/6** back to back, spins
+  4/7/15/20/35, payout matching the computed winner every run.
 
-Not started:
+Remaining before `fairRandomnessV2` / `realMoneyEnabled`:
 
-- **A.6.7** — game-server consumes the new `open -> close -> settle` lifecycle
-  (emit `MessageClose<Game>` after betting, settle only after `entropy_end`).
-- **A.6.6 (remainder)** — wallet -> bet -> payout E2E on the isolated Canopy
-  node. `fairRandomnessV2` stays false until both pass.
+- **VDF hardening** — populate and verify the reserved `vdf_output` across the
+  plugin boundary so a full proposer-run is not the only grind barrier.
+- **Independent replay + review** of the whole close/reveal path (workstream 8).

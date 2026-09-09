@@ -1,3 +1,32 @@
+diff --git a/plugin/python/Dockerfile b/plugin/python/Dockerfile
+index ae137ef0..54a5f412 100644
+--- a/plugin/python/Dockerfile
++++ b/plugin/python/Dockerfile
+@@ -4,9 +4,12 @@
+ # Stage 1: Build Canopy (Go)
+ FROM golang:1.26-alpine AS canopy-builder
+ WORKDIR /app
++RUN apk add --no-cache nodejs npm
+ COPY go.mod go.sum ./
+ RUN go mod download
+ COPY . .
++RUN npm ci --prefix cmd/rpc/web/wallet && npm run build --prefix cmd/rpc/web/wallet
++RUN npm ci --prefix cmd/rpc/web/explorer && npm run build --prefix cmd/rpc/web/explorer
+ RUN go build -trimpath -ldflags="-s -w" -o /canopy ./cmd/main/...
+ 
+ # Stage 2: Runtime with Python
+@@ -24,6 +27,11 @@ COPY --from=canopy-builder /canopy .
+ # Copy Python plugin to correct path (Canopy expects plugin/python/pluginctl.sh)
+ COPY plugin/python/ ./plugin/python/
+ 
++# Windows checkouts may preserve CRLF in the Bash entrypoint.  Normalize it in
++# the image so the kernel can resolve /bin/bash when Canopy starts the plugin.
++RUN sed -i 's/\r$//' /app/plugin/python/pluginctl.sh && \
++    chmod 0755 /app/plugin/python/pluginctl.sh
++
+ # Remove any existing venv from copy, create fresh venv, and install dependencies
+ RUN rm -rf /app/plugin/python/.venv && \
+     python3 -m venv /app/plugin/python/.venv && \
 diff --git a/plugin/python/Makefile b/plugin/python/Makefile
 index 9106452f..649ad2f5 100644
 --- a/plugin/python/Makefile

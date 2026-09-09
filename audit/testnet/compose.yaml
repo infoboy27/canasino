@@ -2,7 +2,7 @@ name: canasino-valueless
 
 services:
   canopy:
-    image: canopy-python@sha256:2340361d755744ef1709832305c67e06b6e3faab7404a75a0229a73e942fd645
+    image: canasino-canopy-a67-e2e:local
     command: ["/bin/sh", "/opt/canasino/bootstrap.sh"]
     restart: "no"
     read_only: true

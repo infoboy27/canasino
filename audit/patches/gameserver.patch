@@ -11,6 +11,16 @@ index b4342af..44a9c74 100644
  
        - name: Run tests
          run: python -m unittest discover -s tests -t . -v
+diff --git a/.gitignore b/.gitignore
+index b8576d0..76dc926 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -15,3 +15,5 @@ ui-dist/
+ .casino-test-admin-token
+ .roulette-test-op-keystore-password
+ test-data/
++.local/
++.cache/
 diff --git a/Dockerfile.audit b/Dockerfile.audit
 new file mode 100644
 index 0000000..e7b7b2e
@@ -138,7 +148,7 @@ index 8512934..fcaa11e 100644
              raise ValueError("cannot debit a negative amount")
          if not self.can_afford(currency, amount):
 diff --git a/gameserver/app.py b/gameserver/app.py
-index 5e5d490..8087703 100644
+index 5e5d490..025053f 100644
 --- a/gameserver/app.py
 +++ b/gameserver/app.py
 @@ -34,7 +34,7 @@ Endpoints:
@@ -193,7 +203,15 @@ index 5e5d490..8087703 100644
  
  MAX_OPEN_ROUNDS_PER_ROOM = 5
  MAX_OPEN_ROUNDS_TOTAL = 20
-@@ -120,18 +125,23 @@ class CreateRound(BaseModel):
+@@ -103,6 +108,7 @@ POKER_BIG_BLIND = 2_000_000      # 2 CNPY
+ POKER_BUY_IN = 200_000_000       # 200 CNPY
+ POKER_RAKE_BPS = 1000
+ MAX_OPEN_POKER_ROUNDS = 10
++DEFAULT_OPERATOR_BOND = 1_000_000  # 1 CNPY; production sizing is an explicit policy decision
+ 
+ class CreateRound(BaseModel):
+     """Only `room` is client-controlled. entry_fee/rake_bps/payout_weights_bps
+@@ -120,18 +126,23 @@ class CreateRound(BaseModel):
          return v
  
  
@@ -223,7 +241,7 @@ index 5e5d490..8087703 100644
  
  
  def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
-@@ -143,9 +153,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
+@@ -143,9 +154,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
  
  class RouletteBetBody(BaseModel):
      bet_type: str
@@ -236,7 +254,7 @@ index 5e5d490..8087703 100644
  
      @field_validator("amount")
      @classmethod
-@@ -156,11 +166,11 @@ class RouletteBetBody(BaseModel):
+@@ -156,11 +167,11 @@ class RouletteBetBody(BaseModel):
          return v
  
  
@@ -252,7 +270,7 @@ index 5e5d490..8087703 100644
  
      @field_validator("amount")
      @classmethod
-@@ -172,18 +182,21 @@ class RouletteRegisterBody(BaseModel):
+@@ -172,18 +183,21 @@ class RouletteRegisterBody(BaseModel):
  
  
  class DominoJoinBody(BaseModel):
@@ -280,7 +298,7 @@ index 5e5d490..8087703 100644
  
      @field_validator("action")
      @classmethod
-@@ -194,17 +207,20 @@ class DominoMoveBody(BaseModel):
+@@ -194,17 +208,20 @@ class DominoMoveBody(BaseModel):
  
  
  class PokerJoinBody(BaseModel):
@@ -306,7 +324,7 @@ index 5e5d490..8087703 100644
  
      @field_validator("action")
      @classmethod
-@@ -214,6 +230,26 @@ class PokerActionBody(BaseModel):
+@@ -214,6 +231,26 @@ class PokerActionBody(BaseModel):
          return v
  
  
@@ -333,7 +351,7 @@ index 5e5d490..8087703 100644
  def _shop_item(item) -> dict:
      d = asdict(item)
      d["grants"] = asdict(item.grants)
-@@ -225,6 +261,24 @@ def _load_or_create_operator(bridge: CanopyBridge, store: Store) -> Key:
+@@ -225,6 +262,24 @@ def _load_or_create_operator(bridge: CanopyBridge, store: Store) -> Key:
      settle_room for every round it opened. Generating a fresh one each boot
      (the old behavior) permanently strands any round left open across a
      restart, with no recovery path."""
@@ -358,7 +376,7 @@ index 5e5d490..8087703 100644
      saved = store.load_key("operator")
      if saved is not None:
          return Key(address=saved["address"], public_key=saved["public_key"], private_key=saved["private_key"])
-@@ -242,7 +296,7 @@ def _load_or_create_admin_token(store: Store) -> str:
+@@ -242,7 +297,7 @@ def _load_or_create_admin_token(store: Store) -> str:
          return token
      token = secrets.token_hex(24)
      store.save_setting("admin_token", token)
@@ -367,7 +385,7 @@ index 5e5d490..8087703 100644
            flush=True)
      print("[casino-gameserver] Set CASINO_ADMIN_TOKEN in the environment to control this explicitly.",
            flush=True)
-@@ -250,15 +304,32 @@ def _load_or_create_admin_token(store: Store) -> str:
+@@ -250,15 +305,38 @@ def _load_or_create_admin_token(store: Store) -> str:
  
  
  def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -> FastAPI:
@@ -382,16 +400,26 @@ index 5e5d490..8087703 100644
 +    bridge.store = store
      operator = _load_or_create_operator(bridge, store)
      admin_token = _load_or_create_admin_token(store)
+-    manager = RoomManager(bridge, operator, store=store)
+-    roulette_manager = RouletteManager(bridge, operator, store=store)
+-    domino_manager = DominoManager(bridge, operator, store=store)
+-    poker_manager = PokerManager(bridge, operator, store=store)
 +    wallet_authorizer = WalletAuthorizer(
 +        store,
 +        domain=os.environ.get("CASINO_AUTH_DOMAIN", "canasino.org"),
 +        chain_id=bridge.chain_id,
 +        network_id=bridge.network_id,
 +    )
-     manager = RoomManager(bridge, operator, store=store)
-     roulette_manager = RouletteManager(bridge, operator, store=store)
-     domino_manager = DominoManager(bridge, operator, store=store)
-     poker_manager = PokerManager(bridge, operator, store=store)
++    try:
++        operator_bond = int(os.environ.get("CASINO_OPERATOR_BOND", str(DEFAULT_OPERATOR_BOND)))
++    except ValueError as exc:
++        raise ValueError("CASINO_OPERATOR_BOND must be a positive integer") from exc
++    if operator_bond <= 0:
++        raise ValueError("CASINO_OPERATOR_BOND must be a positive integer")
++    manager = RoomManager(bridge, operator, store=store, operator_bond=operator_bond)
++    roulette_manager = RouletteManager(bridge, operator, store=store, operator_bond=operator_bond)
++    domino_manager = DominoManager(bridge, operator, store=store, operator_bond=operator_bond)
++    poker_manager = PokerManager(bridge, operator, store=store, operator_bond=operator_bond)
      app = FastAPI(title="Canasino")
 +    chain_writes_enabled = (
 +        os.environ.get("CASINO_CHAIN_WRITES_ENABLED", "").lower() in ("1", "true", "yes") or
@@ -401,7 +429,7 @@ index 5e5d490..8087703 100644
  
      _cors_env = os.environ.get(
          "CASINO_CORS_ORIGINS",
-@@ -266,19 +337,35 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -266,19 +344,35 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          "https://canasino.org,https://www.canasino.org"
      )
      cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
@@ -438,7 +466,7 @@ index 5e5d490..8087703 100644
      async def broadcast_domino(rid: str, message: dict) -> None:
          dead = []
          for ws in domino_conns.get(rid, []):
-@@ -300,14 +387,203 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -300,14 +394,203 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
              poker_conns[rid].remove(ws)
  
      def require_admin(authorization: str | None = Header(default=None)) -> None:
@@ -644,7 +672,7 @@ index 5e5d490..8087703 100644
  
      @app.get("/rooms")
      def rooms():
-@@ -343,7 +619,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -343,7 +626,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          ]
  
      @app.get("/players/{address}/wallet")
@@ -653,7 +681,7 @@ index 5e5d490..8087703 100644
          """Available (on-chain account balance) + locked (escrowed in open
          rounds) + settled-round history, in one call for the Wallet screen."""
          addr = address.lower()
-@@ -356,11 +632,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -356,11 +639,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          }
  
      @app.get("/players/{address}/gems")
@@ -667,7 +695,32 @@ index 5e5d490..8087703 100644
          """Admin-only: there is no payment processor yet, so gems are normally
          minted by the operator once a real IAP clears. Requires the admin
          token — never reachable from client code without it."""
-@@ -407,11 +683,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -386,7 +669,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                                    room=body.room)
+         return {"roundId": rnd.id_hex, "commitment": rnd.commitment.hex(),
+                 "entryFee": rnd.entry_fee, "rakeBps": rnd.rake_bps,
+-                "payoutWeightsBps": rnd.payout_weights_bps}
++                "payoutWeightsBps": rnd.payout_weights_bps, "operatorBond": operator_bond}
+ 
+     @app.post("/rounds/{rid}/join")
+     def join(rid: str, body: JoinBody):
+@@ -395,23 +678,33 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         # the server holds the seed, so it can reveal THIS player's card grids
+         # (row-major 5x5, FREE center = 0) — revealing card numbers does not leak
+         # the seed, so commit-reveal fairness is preserved.
+-        cards = [c.rows() for c in manager.cards_for(rnd, addr, body.num_cards)]
+-        return {"player": addr, "numCards": body.num_cards, "cards": cards}
++        return {"player": addr, "numCards": body.num_cards, "cards": None,
++                "cardsPending": True}
+ 
+     @app.get("/rounds/{rid}")
+     def get_round(rid: str):
+         rnd = manager.rounds[rid]
+         return {"roundId": rid, "status": rnd.status, "players": list(rnd.participants),
+-                "commitment": rnd.commitment.hex()}
++                "commitment": rnd.commitment.hex(), "closeHeight": rnd.close_height or None,
++                "entropyEnd": rnd.entropy_end or None}
+ 
      # --- wallet-signed join support (FleetWallet bingo_join) ------------------
  
      @app.post("/rounds/{rid}/register")
@@ -691,7 +744,13 @@ index 5e5d490..8087703 100644
  
      @app.get("/rounds/{rid}/info")
      def round_info(rid: str):
-@@ -436,17 +721,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -432,21 +725,28 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         settled = rnd.status == "settled"
+         return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
+                 "seed": rnd.seed.hex() if settled else None,
++                "closeTxHash": rnd.close_tx_hash or None, "closeHeight": rnd.close_height or None,
++                "entropyStart": rnd.entropy_start or None, "entropyEnd": rnd.entropy_end or None,
+                 "settleTxHash": rnd.settle_tx_hash if settled else None,
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/rounds/{rid}/card")
@@ -703,6 +762,8 @@ index 5e5d490..8087703 100644
 +        participant = rnd.participants.get(address.lower())
 +        if participant is None or participant.num_cards != num_cards:
 +            raise HTTPException(status_code=403, detail="Registered cards required")
++        if not rnd.outcome_seed:
++            raise HTTPException(status_code=425, detail="Round entropy is not ready")
          cards = [c.rows() for c in manager.cards_for(rnd, address, int(num_cards))]
          return {"player": address, "numCards": int(num_cards), "cards": cards}
  
@@ -714,7 +775,7 @@ index 5e5d490..8087703 100644
          return store.history_for(address.lower(), limit)
  
      @app.get("/players/{address}/stats")
-@@ -454,7 +742,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -454,7 +754,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return store.stats_for(address.lower())
  
      @app.get("/leaderboard")
@@ -723,7 +784,24 @@ index 5e5d490..8087703 100644
          if period not in ("daily", "weekly", "monthly", "alltime"):
              period = "alltime"
          return store.leaderboard(period, limit)
-@@ -488,13 +776,21 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -472,7 +772,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         rnd = roulette_manager.open_round(ROULETTE_RAKE_BPS)
+         return {"roundId": rnd.id_hex, "commitment": rnd.commitment.hex(), "rakeBps": rnd.rake_bps,
+                 "betWindowSeconds": ROULETTE_BET_WINDOW_SECONDS,
+-                "minBet": ROULETTE_MIN_BET, "maxBet": ROULETTE_MAX_BET}
++                "minBet": ROULETTE_MIN_BET, "maxBet": ROULETTE_MAX_BET,
++                "operatorBond": operator_bond}
+ 
+     @app.post("/roulette/rounds/{rid}/bet")
+     def roulette_bet(rid: str, body: RouletteBetBody):
+@@ -483,18 +784,27 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+     def get_roulette_round(rid: str):
+         rnd = roulette_manager.rounds[rid]
+         return {"roundId": rid, "status": rnd.status, "bettors": list(rnd.bets),
+-                "commitment": rnd.commitment.hex(), "rakeBps": rnd.rake_bps}
++                "commitment": rnd.commitment.hex(), "rakeBps": rnd.rake_bps,
++                "closeHeight": rnd.close_height or None, "entropyEnd": rnd.entropy_end or None}
+ 
      # --- wallet-signed bet support (mirrors Bingo's bingo_join path) -----------
  
      @app.post("/roulette/rounds/{rid}/register")
@@ -750,7 +828,15 @@ index 5e5d490..8087703 100644
  
      @app.get("/roulette/rounds/{rid}/info")
      def roulette_round_info(rid: str):
-@@ -519,7 +815,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -513,13 +823,15 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         settled = rnd.status == "settled"
+         return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
+                 "seed": rnd.seed.hex() if settled else None,
++                "closeTxHash": rnd.close_tx_hash or None, "closeHeight": rnd.close_height or None,
++                "entropyStart": rnd.entropy_start or None, "entropyEnd": rnd.entropy_end or None,
+                 "spin": rnd.spin if settled else None,
+                 "color": eroulette.color_of(rnd.spin) if settled else None,
+                 "settleTxHash": rnd.settle_tx_hash if settled else None,
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/roulette/history")
@@ -759,7 +845,26 @@ index 5e5d490..8087703 100644
          return store.roulette_history_for(address.lower(), limit)
  
      @app.websocket("/ws/roulette/{rid}")
-@@ -567,13 +863,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -540,6 +852,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+             step = min(1.0, remaining)
+             await asyncio.sleep(step)
+             remaining -= step
++        await websocket.send_json({"type": "closed"})
++        await asyncio.to_thread(roulette_manager.prepare_outcome, rid)
+         await websocket.send_json({"type": "spinning"})
+         result = await asyncio.to_thread(roulette_manager.settle, rid)  # on-chain reveal + payout
+         await websocket.send_json({"type": "settled", **result})
+@@ -556,7 +870,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+             raise HTTPException(status_code=429, detail="too many open domino rounds")
+         rnd = domino_manager.open_round(DOMINO_ENTRY_FEE, DOMINO_RAKE_BPS)
+         return {"roundId": rnd.id_hex, "commitment": rnd.commitment.hex(),
+-                "entryFee": rnd.entry_fee, "rakeBps": rnd.rake_bps}
++                "entryFee": rnd.entry_fee, "rakeBps": rnd.rake_bps,
++                "operatorBond": operator_bond}
+ 
+     @app.post("/domino/rounds/{rid}/join")
+     def join_domino(rid: str, body: DominoJoinBody | None = None):
+@@ -567,13 +882,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return {"player": addr, "seat": domino_manager.rounds[rid].player_order.index(addr)}
  
      @app.post("/domino/rounds/{rid}/register")
@@ -785,7 +890,7 @@ index 5e5d490..8087703 100644
  
      @app.get("/domino/rounds/{rid}")
      def get_domino_round(rid: str):
-@@ -589,6 +891,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -589,6 +910,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "handSizes": [len(h) for h in engine.hands],
                  "finished": engine.finished,
              })
@@ -793,7 +898,7 @@ index 5e5d490..8087703 100644
          return body
  
      @app.get("/domino/rounds/{rid}/info")
-@@ -600,10 +903,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -600,10 +922,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": domino_manager.bridge.query_url}
  
      @app.get("/domino/rounds/{rid}/hand")
@@ -806,7 +911,16 @@ index 5e5d490..8087703 100644
          hand = domino_manager.hand_for(rid, address.lower())
          return {"address": address.lower(), "hand": [list(t) for t in hand]}
  
-@@ -620,20 +921,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -613,6 +933,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         settled = rnd.status == "settled"
+         return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
+                 "seed": rnd.seed.hex() if settled else None,
++                "closeTxHash": rnd.close_tx_hash or None, "closeHeight": rnd.close_height or None,
++                "entropyStart": rnd.entropy_start or None, "entropyEnd": rnd.entropy_end or None,
+                 "moves": rnd.moves if settled else None,
+                 "winners": rnd.result.winners if rnd.result else None,
+                 "reason": rnd.result.reason if rnd.result else None,
+@@ -620,20 +942,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/domino/history")
@@ -836,7 +950,17 @@ index 5e5d490..8087703 100644
          except edomino.IllegalMove as exc:
              raise HTTPException(status_code=422, detail=f"illegal move: {exc}")
          except ValueError as exc:
-@@ -709,13 +1016,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -698,7 +1026,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+             raise HTTPException(status_code=429, detail="too many open poker rounds")
+         rnd = poker_manager.open_round(POKER_SMALL_BLIND, POKER_BIG_BLIND, POKER_BUY_IN, POKER_RAKE_BPS)
+         return {"roundId": rnd.id_hex, "commitment": rnd.commitment.hex(), "smallBlind": rnd.small_blind,
+-                "bigBlind": rnd.big_blind, "buyIn": rnd.buy_in, "rakeBps": rnd.rake_bps}
++                "bigBlind": rnd.big_blind, "buyIn": rnd.buy_in, "rakeBps": rnd.rake_bps,
++                "operatorBond": operator_bond}
+ 
+     @app.post("/poker/rounds/{rid}/join")
+     def join_poker(rid: str, body: PokerJoinBody | None = None):
+@@ -709,13 +1038,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return {"player": addr, "seat": poker_manager.rounds[rid].player_order.index(addr)}
  
      @app.post("/poker/rounds/{rid}/register")
@@ -862,7 +986,7 @@ index 5e5d490..8087703 100644
  
      @app.get("/poker/rounds/{rid}")
      def get_poker_round(rid: str):
-@@ -736,6 +1049,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -736,6 +1071,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "allIn": engine.all_in,
                  "finished": engine.finished,
              })
@@ -870,7 +994,7 @@ index 5e5d490..8087703 100644
          return body
  
      @app.get("/poker/rounds/{rid}/info")
-@@ -748,9 +1062,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -748,9 +1084,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": poker_manager.bridge.query_url}
  
      @app.get("/poker/rounds/{rid}/hand")
@@ -882,7 +1006,7 @@ index 5e5d490..8087703 100644
          hole = poker_manager.hole_cards_for(rid, address.lower())
          return {"address": address.lower(), "hole": [list(c) for c in hole]}
  
-@@ -758,7 +1071,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -758,9 +1093,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      def poker_proof(rid: str):
          rnd = poker_manager.rounds[rid]
          settled = rnd.status == "settled"
@@ -890,8 +1014,12 @@ index 5e5d490..8087703 100644
 +        result = rnd.result if settled else None
          return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
                  "seed": rnd.seed.hex() if settled else None,
++                "closeTxHash": rnd.close_tx_hash or None, "closeHeight": rnd.close_height or None,
++                "entropyStart": rnd.entropy_start or None, "entropyEnd": rnd.entropy_end or None,
                  "actions": rnd.actions if settled else None,
-@@ -770,20 +1083,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "winners": result.winners if result else None,
+                 "reason": result.reason if result else None,
+@@ -770,20 +1107,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/poker/history")
@@ -921,6 +1049,16 @@ index 5e5d490..8087703 100644
          except epoker.IllegalMove as exc:
              raise HTTPException(status_code=422, detail=f"illegal action: {exc}")
          except ValueError as exc:
+@@ -874,6 +1217,9 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+             await websocket.send_json({"type": "error", "message": "unknown round"})
+             await websocket.close()
+             return
++        rnd = await asyncio.to_thread(manager.prepare_outcome, rid)
++        await websocket.send_json({"type": "closed", "closeHeight": rnd.close_height,
++                                   "entropyEnd": rnd.entropy_end})
+         delay = float(os.environ.get("BINGO_BALL_DELAY", "0"))
+         winners: list[str] = []
+         balls = 0
 diff --git a/gameserver/auth.py b/gameserver/auth.py
 new file mode 100644
 index 0000000..4160f20
@@ -1111,7 +1249,7 @@ index 0000000..4160f20
 +            raise AuthError("wallet authorization grant is invalid, expired, used or payload-mismatched")
 +        return operation
 diff --git a/gameserver/chain.py b/gameserver/chain.py
-index 44ddc65..fea4009 100644
+index 44ddc65..d40d657 100644
 --- a/gameserver/chain.py
 +++ b/gameserver/chain.py
 @@ -10,11 +10,13 @@ from __future__ import annotations
@@ -1129,7 +1267,29 @@ index 44ddc65..fea4009 100644
  from google.protobuf import any_pb2
  
  from . import tx_pb2
-@@ -51,17 +53,91 @@ TYPE_URL = {
+@@ -31,17 +33,21 @@ TYPE_URL = {
+     "transfer_cosmetic": "type.googleapis.com/types.MessageTransferCosmetic",
+     "open_room": "type.googleapis.com/types.MessageOpenRoom",
+     "join_room": "type.googleapis.com/types.MessageJoinRoom",
++    "close_room": "type.googleapis.com/types.MessageCloseRoom",
+     "settle_room": "type.googleapis.com/types.MessageSettleRoom",
+     "open_roulette": "type.googleapis.com/types.MessageOpenRoulette",
+     "roulette_bet": "type.googleapis.com/types.MessageRouletteBet",
++    "close_roulette": "type.googleapis.com/types.MessageCloseRoulette",
+     "settle_roulette": "type.googleapis.com/types.MessageSettleRoulette",
+     "expire_roulette": "type.googleapis.com/types.MessageExpireRoulette",
+     "open_domino": "type.googleapis.com/types.MessageOpenDomino",
+     "join_domino": "type.googleapis.com/types.MessageJoinDomino",
++    "close_domino": "type.googleapis.com/types.MessageCloseDomino",
+     "settle_domino": "type.googleapis.com/types.MessageSettleDomino",
+     "expire_domino": "type.googleapis.com/types.MessageExpireDomino",
+     "open_poker": "type.googleapis.com/types.MessageOpenPoker",
+     "join_poker": "type.googleapis.com/types.MessageJoinPoker",
++    "close_poker": "type.googleapis.com/types.MessageClosePoker",
+     "settle_poker": "type.googleapis.com/types.MessageSettlePoker",
+     "expire_poker": "type.googleapis.com/types.MessageExpirePoker",
+ }
+@@ -51,17 +57,91 @@ TYPE_URL = {
  class Key:
      address: str      # hex
      public_key: str   # hex
@@ -1223,7 +1383,7 @@ index 44ddc65..fea4009 100644
          self.query_url = query_url
          self.admin_url = admin_url
          self.plugin_url = plugin_url
-@@ -69,6 +145,9 @@ class CanopyBridge:
+@@ -69,6 +149,9 @@ class CanopyBridge:
          self.chain_id = chain_id
          self.fee = fee
          self.pwd = keystore_password
@@ -1233,7 +1393,7 @@ index 44ddc65..fea4009 100644
  
      # -- http ----------------------------------------------------------------
  
-@@ -117,26 +196,97 @@ class CanopyBridge:
+@@ -117,26 +200,103 @@ class CanopyBridge:
          tx.chain_id = self.chain_id
          return tx.SerializeToString()
  
@@ -1323,8 +1483,8 @@ index 44ddc65..fea4009 100644
 +            self.store.mark_chain_submission(operation_id, "SUBMITTED", int(time.time()))
 +        return expected_hash
 +
-+    def submit_and_wait(self, signer: Key, msg_type: str, msg_bytes: bytes, timeout=150.0,
-+                        operation_id: str | None = None) -> str:
++    def submit_and_wait_receipt(self, signer: Key, msg_type: str, msg_bytes: bytes, timeout=150.0,
++                                operation_id: str | None = None) -> tuple[str, dict]:
 +        txh = self.submit(signer, msg_type, msg_bytes, operation_id=operation_id)
 +        deadline = time.time() + timeout
 +        while time.time() < deadline:
@@ -1334,14 +1494,20 @@ index 44ddc65..fea4009 100644
 +                    self.store.mark_chain_submission(
 +                        operation_id, "FINALIZED", int(time.time()), receipt_height=receipt["height"],
 +                    )
-+                return txh
++                return txh, receipt
 +            except ReceiptPending:
 +                time.sleep(1)
 +        raise TimeoutError(f"{msg_type} tx {txh} did not reach finality in {timeout}s")
++
++    def submit_and_wait(self, signer: Key, msg_type: str, msg_bytes: bytes, timeout=150.0,
++                        operation_id: str | None = None) -> str:
++        return self.submit_and_wait_receipt(
++            signer, msg_type, msg_bytes, timeout=timeout, operation_id=operation_id,
++        )[0]
  
      # -- typed transactions --------------------------------------------------
  
-@@ -145,10 +295,10 @@ class CanopyBridge:
+@@ -145,10 +305,10 @@ class CanopyBridge:
                                   recipient_address=bytes.fromhex(recipient), amount=amount)
          return self.submit_and_wait(signer, "faucet", m.SerializeToString())
  
@@ -1354,16 +1520,18 @@ index 44ddc65..fea4009 100644
  
      def buy_gems(self, admin: Key, recipient: str, amount: int):
          m = tx_pb2.MessageBuyGems(admin_address=admin.addr_bytes,
-@@ -156,54 +306,62 @@ class CanopyBridge:
+@@ -156,54 +316,86 @@ class CanopyBridge:
          return self.submit_and_wait(admin, "buy_gems", m.SerializeToString())
  
      def open_room(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int,
 -                  rake_bps: int, payout_weights_bps):
-+                  rake_bps: int, payout_weights_bps, operation_id: str | None = None):
++                  rake_bps: int, payout_weights_bps, operator_bond: int,
++                  operation_id: str | None = None):
          m = tx_pb2.MessageOpenRoom(operator_address=operator.addr_bytes, round_id=round_id,
                                     commitment=commitment, entry_fee=entry_fee, rake_bps=rake_bps,
-                                    payout_weights_bps=payout_weights_bps)
+-                                   payout_weights_bps=payout_weights_bps)
 -        return self.submit_and_wait(operator, "open_room", m.SerializeToString())
++                                   payout_weights_bps=payout_weights_bps, operator_bond=operator_bond)
 +        return self.submit_and_wait(operator, "open_room", m.SerializeToString(), operation_id=operation_id)
  
 -    def join_room(self, player: Key, round_id: bytes, num_cards: int, amount: int):
@@ -1375,6 +1543,13 @@ index 44ddc65..fea4009 100644
 +        return self.submit_and_wait(player, "join_room", m.SerializeToString(), operation_id=operation_id)
  
 -    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line"):
++    def close_room(self, operator: Key, round_id: bytes, operation_id: str | None = None):
++        m = tx_pb2.MessageCloseRoom(operator_address=operator.addr_bytes, round_id=round_id)
++        tx_hash, receipt = self.submit_and_wait_receipt(
++            operator, "close_room", m.SerializeToString(), operation_id=operation_id,
++        )
++        return tx_hash, receipt["height"]
++
 +    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line",
 +                    operation_id: str | None = None):
          m = tx_pb2.MessageSettleRoom(operator_address=operator.addr_bytes, round_id=round_id,
@@ -1388,10 +1563,12 @@ index 44ddc65..fea4009 100644
  
 -    def open_roulette(self, operator: Key, round_id: bytes, commitment: bytes, rake_bps: int):
 +    def open_roulette(self, operator: Key, round_id: bytes, commitment: bytes, rake_bps: int,
-+                      operation_id: str | None = None):
++                      operator_bond: int, operation_id: str | None = None):
          m = tx_pb2.MessageOpenRoulette(operator_address=operator.addr_bytes, round_id=round_id,
-                                        commitment=commitment, rake_bps=rake_bps)
+-                                       commitment=commitment, rake_bps=rake_bps)
 -        return self.submit_and_wait(operator, "open_roulette", m.SerializeToString())
++                                       commitment=commitment, rake_bps=rake_bps,
++                                       operator_bond=operator_bond)
 +        return self.submit_and_wait(operator, "open_roulette", m.SerializeToString(), operation_id=operation_id)
  
 -    def roulette_bet(self, player: Key, round_id: bytes, bet_type: str, bet_number: int, amount: int):
@@ -1403,6 +1580,13 @@ index 44ddc65..fea4009 100644
 +        return self.submit_and_wait(player, "roulette_bet", m.SerializeToString(), operation_id=operation_id)
  
 -    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes):
++    def close_roulette(self, operator: Key, round_id: bytes, operation_id: str | None = None):
++        m = tx_pb2.MessageCloseRoulette(operator_address=operator.addr_bytes, round_id=round_id)
++        tx_hash, receipt = self.submit_and_wait_receipt(
++            operator, "close_roulette", m.SerializeToString(), operation_id=operation_id,
++        )
++        return tx_hash, receipt["height"]
++
 +    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes,
 +                        operation_id: str | None = None):
          m = tx_pb2.MessageSettleRoulette(operator_address=operator.addr_bytes, round_id=round_id, seed=seed)
@@ -1415,10 +1599,12 @@ index 44ddc65..fea4009 100644
  
 -    def open_domino(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int, rake_bps: int):
 +    def open_domino(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int, rake_bps: int,
-+                    operation_id: str | None = None):
++                    operator_bond: int, operation_id: str | None = None):
          m = tx_pb2.MessageOpenDomino(operator_address=operator.addr_bytes, round_id=round_id,
-                                      commitment=commitment, entry_fee=entry_fee, rake_bps=rake_bps)
+-                                     commitment=commitment, entry_fee=entry_fee, rake_bps=rake_bps)
 -        return self.submit_and_wait(operator, "open_domino", m.SerializeToString())
++                                     commitment=commitment, entry_fee=entry_fee, rake_bps=rake_bps,
++                                     operator_bond=operator_bond)
 +        return self.submit_and_wait(operator, "open_domino", m.SerializeToString(), operation_id=operation_id)
  
 -    def join_domino(self, player: Key, round_id: bytes, amount: int):
@@ -1427,6 +1613,13 @@ index 44ddc65..fea4009 100644
          m = tx_pb2.MessageJoinDomino(player_address=player.addr_bytes, round_id=round_id, amount=amount)
 -        return self.submit_and_wait(player, "join_domino", m.SerializeToString())
 +        return self.submit_and_wait(player, "join_domino", m.SerializeToString(), operation_id=operation_id)
++
++    def close_domino(self, operator: Key, round_id: bytes, operation_id: str | None = None):
++        m = tx_pb2.MessageCloseDomino(operator_address=operator.addr_bytes, round_id=round_id)
++        tx_hash, receipt = self.submit_and_wait_receipt(
++            operator, "close_domino", m.SerializeToString(), operation_id=operation_id,
++        )
++        return tx_hash, receipt["height"]
  
 -    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves):
 +    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves,
@@ -1434,7 +1627,7 @@ index 44ddc65..fea4009 100644
          """`moves` is a list of (action, tile_low, tile_high, end) tuples --
          kept as plain tuples here (not domino.Move) so this bridge has no
          import dependency on the engine package."""
-@@ -211,31 +369,33 @@ class CanopyBridge:
+@@ -211,31 +403,41 @@ class CanopyBridge:
                          for a, lo, hi, e in moves]
          m = tx_pb2.MessageSettleDomino(operator_address=operator.addr_bytes, round_id=round_id,
                                         seed=seed, moves=proto_moves)
@@ -1447,11 +1640,13 @@ index 44ddc65..fea4009 100644
  
      def open_poker(self, operator: Key, round_id: bytes, commitment: bytes, small_blind: int,
 -                   big_blind: int, buy_in: int, rake_bps: int):
-+                   big_blind: int, buy_in: int, rake_bps: int, operation_id: str | None = None):
++                   big_blind: int, buy_in: int, rake_bps: int, operator_bond: int,
++                   operation_id: str | None = None):
          m = tx_pb2.MessageOpenPoker(operator_address=operator.addr_bytes, round_id=round_id,
                                      commitment=commitment, small_blind=small_blind, big_blind=big_blind,
-                                     buy_in=buy_in, rake_bps=rake_bps)
+-                                    buy_in=buy_in, rake_bps=rake_bps)
 -        return self.submit_and_wait(operator, "open_poker", m.SerializeToString())
++                                    buy_in=buy_in, rake_bps=rake_bps, operator_bond=operator_bond)
 +        return self.submit_and_wait(operator, "open_poker", m.SerializeToString(), operation_id=operation_id)
  
 -    def join_poker(self, player: Key, round_id: bytes, amount: int):
@@ -1462,6 +1657,13 @@ index 44ddc65..fea4009 100644
 +        return self.submit_and_wait(player, "join_poker", m.SerializeToString(), operation_id=operation_id)
  
 -    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions):
++    def close_poker(self, operator: Key, round_id: bytes, operation_id: str | None = None):
++        m = tx_pb2.MessageClosePoker(operator_address=operator.addr_bytes, round_id=round_id)
++        tx_hash, receipt = self.submit_and_wait_receipt(
++            operator, "close_poker", m.SerializeToString(), operation_id=operation_id,
++        )
++        return tx_hash, receipt["height"]
++
 +    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions,
 +                     operation_id: str | None = None):
          """`actions` is a list of (action, amount) tuples -- kept as plain
@@ -1475,7 +1677,38 @@ index 44ddc65..fea4009 100644
  
      def expire_poker(self, caller: Key, round_id: bytes):
          m = tx_pb2.MessageExpirePoker(caller_address=caller.addr_bytes, round_id=round_id)
-@@ -260,15 +420,74 @@ class CanopyBridge:
+@@ -246,6 +448,30 @@ class CanopyBridge:
+     def height(self) -> int:
+         return int(json.loads(self._post(f"{self.query_url}/v1/query/height", {}))["height"])
+ 
++    def wait_for_height(self, target_height: int, timeout: float = 150.0, poll: float = 1.0) -> int:
++        """Wait until ``target_height`` exists; settlement needs entropy_end+1."""
++        deadline = time.time() + timeout
++        while time.time() < deadline:
++            height = self.height()
++            if height >= target_height:
++                return height
++            time.sleep(poll)
++        raise TimeoutError(f"chain did not reach height {target_height} in {timeout}s")
++
++    def block_hash(self, height: int) -> bytes:
++        response = json.loads(self._post(
++            f"{self.query_url}/v1/query/block-by-height", {"height": height},
++        ))
++        header = response.get("blockHeader") or response.get("result", {}).get("blockHeader") or {}
++        value = str(header.get("hash", "")).removeprefix("0x")
++        try:
++            block_hash = bytes.fromhex(value)
++        except ValueError as exc:
++            raise ReceiptInvalid(f"block {height} returned an invalid hash") from exc
++        if len(block_hash) != 32:
++            raise ReceiptInvalid(f"block {height} returned an invalid hash")
++        return block_hash
++
+     def account_balance(self, address: str) -> int:
+         d = json.loads(self._post(f"{self.query_url}/v1/query/account", {"address": address}))
+         return int(d.get("amount", 0))
+@@ -260,15 +486,74 @@ class CanopyBridge:
              return None
  
      def wait_inclusion(self, sender_addr: str, tx_hash: str, timeout=150.0) -> bool:
@@ -1556,7 +1789,7 @@ index 44ddc65..fea4009 100644
 +                raise ReceiptInvalid(f"transaction field mismatch: {field}")
 +        return {**result, "confirmations": confirmations}
 diff --git a/gameserver/db.py b/gameserver/db.py
-index 95a5723..5746dc5 100644
+index 95a5723..28c9d16 100644
 --- a/gameserver/db.py
 +++ b/gameserver/db.py
 @@ -17,6 +17,8 @@ import json
@@ -1568,8 +1801,55 @@ index 95a5723..5746dc5 100644
  from typing import Dict, List, Optional
  
  DB_PATH = os.environ.get("CASINO_DB_PATH", "/app/data/canasino.db")
-@@ -121,21 +123,368 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
+@@ -55,6 +57,12 @@ CREATE TABLE IF NOT EXISTS open_rounds (
+     room TEXT,
+     order_json TEXT NOT NULL,
+     participants TEXT NOT NULL DEFAULT '{}',
++    status TEXT NOT NULL DEFAULT 'open',
++    close_tx_hash TEXT NOT NULL DEFAULT '',
++    close_height INTEGER NOT NULL DEFAULT 0,
++    entropy_start INTEGER NOT NULL DEFAULT 0,
++    entropy_end INTEGER NOT NULL DEFAULT 0,
++    outcome_seed TEXT NOT NULL DEFAULT '',
+     created_at INTEGER
+ );
+ CREATE TABLE IF NOT EXISTS settings (
+@@ -75,6 +83,12 @@ CREATE TABLE IF NOT EXISTS roulette_open_rounds (
+     commitment TEXT NOT NULL,
+     rake_bps INTEGER NOT NULL,
+     bets TEXT NOT NULL DEFAULT '{}',
++    status TEXT NOT NULL DEFAULT 'open',
++    close_tx_hash TEXT NOT NULL DEFAULT '',
++    close_height INTEGER NOT NULL DEFAULT 0,
++    entropy_start INTEGER NOT NULL DEFAULT 0,
++    entropy_end INTEGER NOT NULL DEFAULT 0,
++    outcome_seed TEXT NOT NULL DEFAULT '',
+     created_at INTEGER
+ );
+ CREATE TABLE IF NOT EXISTS domino_rounds (
+@@ -95,6 +109,12 @@ CREATE TABLE IF NOT EXISTS domino_open_rounds (
+     rake_bps INTEGER NOT NULL,
+     participants TEXT NOT NULL DEFAULT '{}',
+     moves TEXT NOT NULL DEFAULT '[]',
++    status TEXT NOT NULL DEFAULT 'open',
++    close_tx_hash TEXT NOT NULL DEFAULT '',
++    close_height INTEGER NOT NULL DEFAULT 0,
++    entropy_start INTEGER NOT NULL DEFAULT 0,
++    entropy_end INTEGER NOT NULL DEFAULT 0,
++    outcome_seed TEXT NOT NULL DEFAULT '',
+     created_at INTEGER
+ );
+ CREATE TABLE IF NOT EXISTS poker_rounds (
+@@ -119,23 +139,392 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
+     rake_bps INTEGER NOT NULL,
+     participants TEXT NOT NULL DEFAULT '{}',
      actions TEXT NOT NULL DEFAULT '[]',
++    status TEXT NOT NULL DEFAULT 'open',
++    close_tx_hash TEXT NOT NULL DEFAULT '',
++    close_height INTEGER NOT NULL DEFAULT 0,
++    entropy_start INTEGER NOT NULL DEFAULT 0,
++    entropy_end INTEGER NOT NULL DEFAULT 0,
++    outcome_seed TEXT NOT NULL DEFAULT '',
      created_at INTEGER
  );
 +CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -1685,6 +1965,22 @@ index 95a5723..5746dc5 100644
 +        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=15)
          self._conn.execute("PRAGMA journal_mode=WAL")
          self._conn.executescript(SCHEMA)
++        # Additive migration for databases created before fair-randomness-v2.
++        # Closed rounds must retain their exact entropy boundary across restart.
++        fairness_columns = {
++            "status": "TEXT NOT NULL DEFAULT 'open'",
++            "close_tx_hash": "TEXT NOT NULL DEFAULT ''",
++            "close_height": "INTEGER NOT NULL DEFAULT 0",
++            "entropy_start": "INTEGER NOT NULL DEFAULT 0",
++            "entropy_end": "INTEGER NOT NULL DEFAULT 0",
++            "outcome_seed": "TEXT NOT NULL DEFAULT ''",
++        }
++        for table in ("open_rounds", "roulette_open_rounds", "domino_open_rounds",
++                      "poker_open_rounds"):
++            existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
++            for column, declaration in fairness_columns.items():
++                if column not in existing:
++                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
          self._conn.commit()
  
 +    def close(self):
@@ -1939,7 +2235,7 @@ index 95a5723..5746dc5 100644
      # -- round history / stats (written once, at settle) ---------------------
  
      def record_settle(self, round_id_hex: str, room: str, entry_fee: int, rake_bps: int,
-@@ -146,20 +495,15 @@ class Store:
+@@ -146,20 +535,15 @@ class Store:
          Idempotent: a retried/duplicate settle call for the same round_id_hex
          (e.g. a client reconnect replaying the WS flow after a restart) must
          not double-count player_stats — the chain only ever pays out once."""
@@ -1963,7 +2259,7 @@ index 95a5723..5746dc5 100644
              return
  
          winner_set = set(winners)
-@@ -217,12 +561,19 @@ class Store:
+@@ -217,12 +601,19 @@ class Store:
                      for a, g, w, t in cur.fetchall()]
          since = int(time.time()) - window
          cur = self._conn.execute(
@@ -1986,7 +2282,60 @@ index 95a5723..5746dc5 100644
                  s = agg.setdefault(addr, {"address": addr, "gamesPlayed": 0, "wins": 0, "totalWon": 0})
                  s["gamesPlayed"] += 1
                  s["wins"] += 1 if addr in winners else 0
-@@ -296,19 +647,14 @@ class Store:
+@@ -249,6 +640,31 @@ class Store:
+ 
+     # -- open-round crash recovery ---------------------------------------------
+ 
++    def update_round_fairness(self, game: str, round_id_hex: str, status: str,
++                              close_tx_hash: str, close_height: int, entropy_start: int,
++                              entropy_end: int, outcome_seed: str,
++                              order: Optional[List[int]] = None) -> None:
++        tables = {
++            "bingo": "open_rounds", "roulette": "roulette_open_rounds",
++            "domino": "domino_open_rounds", "poker": "poker_open_rounds",
++        }
++        table = tables.get(game)
++        if table is None:
++            raise ValueError("unknown game")
++        assignments = (
++            "status = ?, close_tx_hash = ?, close_height = ?, entropy_start = ?, "
++            "entropy_end = ?, outcome_seed = ?"
++        )
++        params: list = [status, close_tx_hash, close_height, entropy_start, entropy_end, outcome_seed]
++        if order is not None:
++            if game != "bingo":
++                raise ValueError("only bingo persists a draw order")
++            assignments += ", order_json = ?"
++            params.append(json.dumps(order))
++        params.append(round_id_hex)
++        self._conn.execute(f"UPDATE {table} SET {assignments} WHERE round_id = ?", params)
++        self._conn.commit()
++
+     def save_open_round(self, round_id_hex: str, seed_hex: str, commitment_hex: str, entry_fee: int,
+                          rake_bps: int, payout_weights_bps: List[int], room: str, order: List[int]) -> None:
+         self._conn.execute(
+@@ -271,14 +687,18 @@ class Store:
+     def load_open_rounds(self) -> List[dict]:
+         cur = self._conn.execute(
+             "SELECT round_id, seed, commitment, entry_fee, rake_bps, payout_weights_bps, room, "
+-            "order_json, participants FROM open_rounds"
++            "order_json, participants, status, close_tx_hash, close_height, entropy_start, entropy_end, "
++            "outcome_seed FROM open_rounds"
+         )
+         out = []
+-        for round_id, seed, commitment, entry_fee, rake_bps, weights, room, order_json, participants in cur.fetchall():
++        for (round_id, seed, commitment, entry_fee, rake_bps, weights, room, order_json, participants,
++             status, close_tx_hash, close_height, entropy_start, entropy_end, outcome_seed) in cur.fetchall():
+             out.append({
+                 "round_id": round_id, "seed": seed, "commitment": commitment, "entry_fee": entry_fee,
+                 "rake_bps": rake_bps, "payout_weights_bps": json.loads(weights), "room": room,
+                 "order": json.loads(order_json), "participants": json.loads(participants),
++                "status": status, "close_tx_hash": close_tx_hash, "close_height": close_height,
++                "entropy_start": entropy_start, "entropy_end": entropy_end, "outcome_seed": outcome_seed,
+             })
+         return out
+ 
+@@ -296,19 +716,14 @@ class Store:
          for the same round_id_hex must not double-count player_stats. Shares
          the player_stats table with Bingo — a player's win rate/total won is
          tracked across every game, not siloed per game."""
@@ -2009,7 +2358,27 @@ index 95a5723..5746dc5 100644
              return
  
          for addr, delta in payouts.items():
-@@ -384,20 +730,15 @@ class Store:
+@@ -363,13 +778,17 @@ class Store:
+ 
+     def load_open_roulette_rounds(self) -> List[dict]:
+         cur = self._conn.execute(
+-            "SELECT round_id, seed, commitment, rake_bps, bets FROM roulette_open_rounds"
++            "SELECT round_id, seed, commitment, rake_bps, bets, status, close_tx_hash, close_height, "
++            "entropy_start, entropy_end, outcome_seed FROM roulette_open_rounds"
+         )
+         out = []
+-        for round_id, seed, commitment, rake_bps, bets in cur.fetchall():
++        for (round_id, seed, commitment, rake_bps, bets, status, close_tx_hash, close_height,
++             entropy_start, entropy_end, outcome_seed) in cur.fetchall():
+             out.append({
+                 "round_id": round_id, "seed": seed, "commitment": commitment,
+                 "rake_bps": rake_bps, "bets": json.loads(bets),
++                "status": status, "close_tx_hash": close_tx_hash, "close_height": close_height,
++                "entropy_start": entropy_start, "entropy_end": entropy_end, "outcome_seed": outcome_seed,
+             })
+         return out
+ 
+@@ -384,20 +803,15 @@ class Store:
                                tx_hash: str) -> None:
          """Same idempotency guarantee as record_settle/record_roulette_settle.
          Shares player_stats with every other game."""
@@ -2033,7 +2402,29 @@ index 95a5723..5746dc5 100644
              return
  
          winner_set = set(winners)
-@@ -487,21 +828,16 @@ class Store:
+@@ -464,15 +878,19 @@ class Store:
+ 
+     def load_open_domino_rounds(self) -> List[dict]:
+         cur = self._conn.execute(
+-            "SELECT round_id, seed, commitment, entry_fee, rake_bps, participants, moves "
++            "SELECT round_id, seed, commitment, entry_fee, rake_bps, participants, moves, status, "
++            "close_tx_hash, close_height, entropy_start, entropy_end, outcome_seed "
+             "FROM domino_open_rounds"
+         )
+         out = []
+-        for round_id, seed, commitment, entry_fee, rake_bps, participants, moves in cur.fetchall():
++        for (round_id, seed, commitment, entry_fee, rake_bps, participants, moves, status,
++             close_tx_hash, close_height, entropy_start, entropy_end, outcome_seed) in cur.fetchall():
+             out.append({
+                 "round_id": round_id, "seed": seed, "commitment": commitment,
+                 "entry_fee": entry_fee, "rake_bps": rake_bps,
+                 "participants": json.loads(participants), "moves": json.loads(moves),
++                "status": status, "close_tx_hash": close_tx_hash, "close_height": close_height,
++                "entropy_start": entropy_start, "entropy_end": entropy_end, "outcome_seed": outcome_seed,
+             })
+         return out
+ 
+@@ -487,21 +905,16 @@ class Store:
                               tx_hash: str) -> None:
          """Same idempotency guarantee as record_settle/record_domino_settle.
          Shares player_stats with every other game."""
@@ -2058,8 +2449,30 @@ index 95a5723..5746dc5 100644
              return
  
          winner_set = set(winners)
+@@ -571,15 +984,19 @@ class Store:
+     def load_open_poker_rounds(self) -> List[dict]:
+         cur = self._conn.execute(
+             "SELECT round_id, seed, commitment, small_blind, big_blind, buy_in, rake_bps, "
+-            "participants, actions FROM poker_open_rounds"
++            "participants, actions, status, close_tx_hash, close_height, entropy_start, entropy_end, "
++            "outcome_seed FROM poker_open_rounds"
+         )
+         out = []
+         for (round_id, seed, commitment, small_blind, big_blind, buy_in, rake_bps,
+-             participants, actions) in cur.fetchall():
++             participants, actions, status, close_tx_hash, close_height, entropy_start, entropy_end,
++             outcome_seed) in cur.fetchall():
+             out.append({
+                 "round_id": round_id, "seed": seed, "commitment": commitment,
+                 "small_blind": small_blind, "big_blind": big_blind, "buy_in": buy_in, "rake_bps": rake_bps,
+                 "participants": json.loads(participants), "actions": json.loads(actions),
++                "status": status, "close_tx_hash": close_tx_hash, "close_height": close_height,
++                "entropy_start": entropy_start, "entropy_end": entropy_end, "outcome_seed": outcome_seed,
+             })
+         return out
+ 
 diff --git a/gameserver/domino_rooms.py b/gameserver/domino_rooms.py
-index 2895d4e..0da876e 100644
+index 2895d4e..007eaaa 100644
 --- a/gameserver/domino_rooms.py
 +++ b/gameserver/domino_rooms.py
 @@ -6,15 +6,20 @@ open round in memory (rebuilt from the persisted move log on restart) so
@@ -2087,26 +2500,48 @@ index 2895d4e..0da876e 100644
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional, Tuple
  
-@@ -23,6 +28,9 @@ from engine.rng import commitment
+@@ -23,6 +28,10 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
++from .fairness import DEFAULT_ENTROPY_WAIT_TIMEOUT, entropy_bounds, wait_and_derive
 +from .synchronization import synchronized, settled_once
 +
 +logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -73,6 +81,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -39,10 +48,15 @@ class DominoRound:
+     rake_bps: int
+     participants: Dict[str, Participant] = field(default_factory=dict)  # insertion order = seat order
+     moves: List[dict] = field(default_factory=list)
+-    status: str = "open"  # open -> settled | expired
++    status: str = "open"  # open -> closed -> settled | expired
+     settle_tx_hash: str = ""
+     settle_height: int = 0
+     result: Optional[edomino.GameResult] = None
++    close_tx_hash: str = ""
++    close_height: int = 0
++    entropy_start: int = 0
++    entropy_end: int = 0
++    outcome_seed: bytes = b""
+ 
+     @property
+     def id_hex(self) -> str:
+@@ -72,14 +86,19 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+ 
  
  class DominoManager:
-     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
+-    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None,
++                 operator_bond: int = 1_000_000):
 +        self._state_lock = RLock()
 +        self._settled_results = {}
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -80,6 +90,7 @@ class DominoManager:
++        self.operator_bond = operator_bond
+         self.rounds: Dict[str, DominoRound] = {}
          self.engines: Dict[str, edomino.GameEngine] = {}
          if self.store is not None:
              self._reconcile_open_rounds()
@@ -2114,8 +2549,19 @@ index 2895d4e..0da876e 100644
  
      def _reconcile_open_rounds(self) -> None:
          for row in self.store.load_open_domino_rounds():
-@@ -100,6 +111,45 @@ class DominoManager:
-             if len(participants) == edomino.NUM_PLAYERS:
+@@ -94,14 +113,58 @@ class DominoManager:
+             rnd = DominoRound(
+                 round_id=round_id, seed=bytes.fromhex(row["seed"]), commitment=bytes.fromhex(row["commitment"]),
+                 entry_fee=row["entry_fee"], rake_bps=row["rake_bps"], participants=participants,
+-                moves=row["moves"], status="open",
++                moves=row["moves"], status=row["status"],
++                close_tx_hash=row["close_tx_hash"], close_height=row["close_height"],
++                entropy_start=row["entropy_start"], entropy_end=row["entropy_end"],
++                outcome_seed=bytes.fromhex(row["outcome_seed"]) if row["outcome_seed"] else b"",
+             )
+             self.rounds[rnd.id_hex] = rnd
+-            if len(participants) == edomino.NUM_PLAYERS:
++            if len(participants) == edomino.NUM_PLAYERS and rnd.outcome_seed:
                  self._rebuild_engine(rnd)
  
 +    def _resume_custodial_join(self, row: dict) -> str:
@@ -2142,7 +2588,7 @@ index 2895d4e..0da876e 100644
 +        rnd.participants[address] = Participant(key)
 +        self._persist_participants(rnd)
 +        if len(rnd.participants) == edomino.NUM_PLAYERS:
-+            self._rebuild_engine(rnd)
++            self.prepare_outcome(rnd.id_hex)
 +        self.store.mark_custodial_join("domino", rnd.id_hex, address, "APPLIED", int(time.time()))
 +        return address
 +
@@ -2158,9 +2604,14 @@ index 2895d4e..0da876e 100644
 +        return recovered
 +
      def _rebuild_engine(self, rnd: DominoRound) -> edomino.GameEngine:
-         engine = edomino.GameEngine(rnd.seed)
+-        engine = edomino.GameEngine(rnd.seed)
++        if not rnd.outcome_seed:
++            raise ValueError("round entropy is not ready")
++        engine = edomino.GameEngine(rnd.outcome_seed)
          for m in rnd.moves:
-@@ -109,34 +159,58 @@ class DominoManager:
+             engine.apply_move(_dict_to_move(m))
+         self.engines[rnd.id_hex] = engine
+@@ -109,41 +172,65 @@ class DominoManager:
              rnd.result = engine.result
          return engine
  
@@ -2170,7 +2621,7 @@ index 2895d4e..0da876e 100644
          round_id = secrets.token_bytes(8)
          commit = commitment(seed)
 -        self.bridge.open_domino(self.operator, round_id, commit, entry_fee, rake_bps)
-+        self.bridge.open_domino(self.operator, round_id, commit, entry_fee, rake_bps,
++        self.bridge.open_domino(self.operator, round_id, commit, entry_fee, rake_bps, self.operator_bond,
 +                                operation_id=f"domino:open:{round_id.hex()}")
          rnd = DominoRound(round_id, seed, commit, entry_fee, rake_bps)
          self.rounds[rnd.id_hex] = rnd
@@ -2209,7 +2660,8 @@ index 2895d4e..0da876e 100644
          rnd.participants[key.address] = Participant(key)
          self._persist_participants(rnd)
          if len(rnd.participants) == edomino.NUM_PLAYERS:
-             self._rebuild_engine(rnd)
+-            self._rebuild_engine(rnd)
++            self.prepare_outcome(rnd.id_hex)
          return key.address
  
 +    @synchronized
@@ -2222,12 +2674,22 @@ index 2895d4e..0da876e 100644
          if len(rnd.participants) >= edomino.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -153,8 +227,33 @@ class DominoManager:
+         rnd.participants[addr] = Participant(key=None)
+         self._persist_participants(rnd)
+         if len(rnd.participants) == edomino.NUM_PLAYERS:
+-            self._rebuild_engine(rnd)
++            self.prepare_outcome(rnd.id_hex)
+         return addr
+ 
+     def _persist_participants(self, rnd: DominoRound) -> None:
+@@ -153,18 +240,51 @@ class DominoManager:
      def player_index(self, rnd: DominoRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
 +    def _action_context_unlocked(self, round_id_hex: str) -> dict:
 +        rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed" and not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
 +        engine = self.engines.get(round_id_hex)
 +        state = {
 +            "version": "CANASINO-STATE-V1",
@@ -2257,7 +2719,14 @@ index 2895d4e..0da876e 100644
          """Validates and applies one move. Raises engine.domino.IllegalMove on
          an illegal move, or ValueError if the round/turn state doesn't allow
          one at all. Returns a GameResult once this move ends the game, else
-@@ -165,6 +264,10 @@ class DominoManager:
+         None."""
+         rnd = self.rounds[round_id_hex]
+-        if rnd.status != "open":
+-            raise ValueError("round not open")
++        if rnd.status != "closed":
++            raise ValueError("round betting is not closed")
++        if not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
          engine = self.engines.get(round_id_hex)
          if engine is None:
              raise ValueError("round does not have both players yet")
@@ -2268,15 +2737,67 @@ index 2895d4e..0da876e 100644
          idx = self.player_index(rnd, address)
          if engine.turn != idx:
              raise ValueError("not this address's turn")
-@@ -192,6 +295,7 @@ class DominoManager:
+@@ -179,6 +299,8 @@ class DominoManager:
+ 
+     def hand_for(self, round_id_hex: str, address: str) -> List[Tuple[int, int]]:
+         rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed" and not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
+         engine = self.engines.get(round_id_hex)
+         if engine is None:
+             return []
+@@ -187,13 +309,49 @@ class DominoManager:
+     def open_round_count(self) -> int:
+         return sum(1 for rnd in self.rounds.values() if rnd.status == "open")
+ 
++    @synchronized
++    def close_betting(self, round_id_hex: str) -> DominoRound:
++        rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed":
++            return rnd
++        if rnd.status != "open" or len(rnd.participants) != edomino.NUM_PLAYERS:
++            raise ValueError("round needs both players before betting closes")
++        tx_hash, close_height = self.bridge.close_domino(
++            self.operator, rnd.round_id, operation_id=f"domino:close:{rnd.id_hex}",
++        )
++        rnd.status = "closed"
++        rnd.close_tx_hash = tx_hash
++        rnd.close_height = close_height
++        rnd.entropy_start, rnd.entropy_end = entropy_bounds(close_height)
++        if self.store is not None:
++            self.store.update_round_fairness("domino", rnd.id_hex, rnd.status, tx_hash,
++                                             close_height, rnd.entropy_start, rnd.entropy_end, "")
++        return rnd
++
++    @synchronized
++    def prepare_outcome(self, round_id_hex: str,
++                        timeout: float = DEFAULT_ENTROPY_WAIT_TIMEOUT) -> DominoRound:
++        rnd = self.close_betting(round_id_hex)
++        if not rnd.outcome_seed:
++            wait_and_derive(rnd, self.bridge, timeout=timeout)
++            self._rebuild_engine(rnd)
++            if self.store is not None:
++                self.store.update_round_fairness(
++                    "domino", rnd.id_hex, rnd.status, rnd.close_tx_hash, rnd.close_height,
++                    rnd.entropy_start, rnd.entropy_end, rnd.outcome_seed.hex(),
++                )
++        return rnd
++
+     def locked_for(self, address: str) -> int:
+         addr = address.lower()
          return sum(rnd.entry_fee for rnd in self.rounds.values()
-                    if rnd.status == "open" and addr in rnd.participants)
+-                   if rnd.status == "open" and addr in rnd.participants)
++                   if rnd.status in ("open", "closed") and addr in rnd.participants)
  
 +    @settled_once
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
++        if not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
          engine = self.engines[round_id_hex]
-@@ -201,7 +305,10 @@ class DominoManager:
+         if not engine.finished:
+             raise ValueError("game is not finished yet")
+@@ -201,7 +359,10 @@ class DominoManager:
          before = {a: self.bridge.account_balance(a) for a in order}
          proto_moves = [(m["action"], (m["tile"] or [0, 0])[0], (m["tile"] or [0, 0])[1], m.get("end") or "")
                         for m in rnd.moves]
@@ -2288,8 +2809,78 @@ index 2895d4e..0da876e 100644
          after = {a: self.bridge.account_balance(a) for a in order}
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
+diff --git a/gameserver/fairness.py b/gameserver/fairness.py
+new file mode 100644
+index 0000000..83aec0d
+--- /dev/null
++++ b/gameserver/fairness.py
+@@ -0,0 +1,64 @@
++"""Shared game-server side of the fair-randomness-v2 close lifecycle.
++
++The plugin remains authoritative: it consumes its FSM-fed entropy ledger and
++will reject an early or mismatched settlement.  This module independently
++reconstructs the same seed from public finalized blocks so the UI/game engine
++cannot diverge from the outcome the plugin pays.
++"""
++
++from __future__ import annotations
++
++import hashlib
++
++from engine.rng import derive_seed
++
++
++ENTROPY_DELAY_BLOCKS = 8
++ENTROPY_WINDOW_BLOCKS = 8
++RNG_V2_ENTROPY_DOMAIN = b"CANASINO-RNG-V2-ENTROPY"
++RNG_V2_SEED_DOMAIN = b"CANASINO-RNG-V2"
++# The default Canopy schedule is about 20 seconds per block. A close at H must
++# wait through H+16, so 150 seconds can never cover a healthy production node.
++DEFAULT_ENTROPY_WAIT_TIMEOUT = 900.0
++
++
++def entropy_bounds(close_height: int) -> tuple[int, int]:
++    start = close_height + ENTROPY_DELAY_BLOCKS
++    return start, start + ENTROPY_WINDOW_BLOCKS - 1
++
++
++def derive_final_seed(bridge, operator_secret: bytes, round_id: bytes,
++                      entropy_start: int, entropy_end: int) -> bytes:
++    """Reconstruct the exact seed the plugin replays the outcome from.
++
++    This MUST match the plugin byte for byte (contract/contract.py):
++      * fold  = SHA256(RNG_V2_ENTROPY_DOMAIN || h[start] || ... || h[end])
++                -- raw concatenation, every h is a 32-byte finalized block hash;
++      * seed  = derive_seed(RNG_V2_SEED_DOMAIN, operator_secret, fold, round_id)
++                -- derive_seed() length-prefixes every part with a 4-byte
++                big-endian length, so a raw concatenation here would diverge
++                from the outcome the plugin actually pays.
++    """
++    if entropy_end < entropy_start:
++        raise ValueError("invalid entropy window")
++    entropy_hash = hashlib.sha256()
++    entropy_hash.update(RNG_V2_ENTROPY_DOMAIN)
++    for height in range(entropy_start, entropy_end + 1):
++        entropy_hash.update(bridge.block_hash(height))
++    return derive_seed(
++        RNG_V2_SEED_DOMAIN, operator_secret, entropy_hash.digest(), round_id,
++    )
++
++
++def wait_and_derive(round_state, bridge, timeout: float = 150.0) -> bytes:
++    if round_state.status != "closed" or not round_state.entropy_end:
++        raise ValueError("round must be closed before deriving entropy")
++    # The plugin records a block's hash when BeginBlock receives its successor,
++    # hence settlement is legal only strictly after entropy_end.
++    bridge.wait_for_height(round_state.entropy_end + 1, timeout=timeout)
++    seed = derive_final_seed(
++        bridge, round_state.seed, round_state.round_id,
++        round_state.entropy_start, round_state.entropy_end,
++    )
++    round_state.outcome_seed = seed
++    return seed
 diff --git a/gameserver/poker_rooms.py b/gameserver/poker_rooms.py
-index 4014299..c18a226 100644
+index 4014299..3391c3f 100644
 --- a/gameserver/poker_rooms.py
 +++ b/gameserver/poker_rooms.py
 @@ -6,16 +6,20 @@ memory (rebuilt from the persisted action log on restart) so each action
@@ -2318,26 +2909,48 @@ index 4014299..c18a226 100644
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
  
-@@ -24,6 +28,9 @@ from engine.rng import commitment
+@@ -24,6 +28,10 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
++from .fairness import DEFAULT_ENTROPY_WAIT_TIMEOUT, entropy_bounds, wait_and_derive
 +from .synchronization import synchronized, settled_once
 +
 +logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -75,6 +82,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -42,10 +50,15 @@ class PokerRound:
+     rake_bps: int
+     participants: Dict[str, Participant] = field(default_factory=dict)  # insertion order = seat order
+     actions: List[dict] = field(default_factory=list)
+-    status: str = "open"  # open -> settled | expired
++    status: str = "open"  # open -> closed -> settled | expired
+     settle_tx_hash: str = ""
+     settle_height: int = 0
+     result: Optional[epoker.HandResult] = None
++    close_tx_hash: str = ""
++    close_height: int = 0
++    entropy_start: int = 0
++    entropy_end: int = 0
++    outcome_seed: bytes = b""
+ 
+     @property
+     def id_hex(self) -> str:
+@@ -74,14 +87,19 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+ 
  
  class PokerManager:
-     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
+-    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None,
++                 operator_bond: int = 1_000_000):
 +        self._state_lock = RLock()
 +        self._settled_results = {}
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -82,6 +91,7 @@ class PokerManager:
++        self.operator_bond = operator_bond
+         self.rounds: Dict[str, PokerRound] = {}
          self.engines: Dict[str, epoker.PokerEngine] = {}
          if self.store is not None:
              self._reconcile_open_rounds()
@@ -2345,8 +2958,20 @@ index 4014299..c18a226 100644
  
      def _reconcile_open_rounds(self) -> None:
          for row in self.store.load_open_poker_rounds():
-@@ -102,6 +112,45 @@ class PokerManager:
-             if len(participants) == epoker.NUM_PLAYERS:
+@@ -96,14 +114,60 @@ class PokerManager:
+             rnd = PokerRound(
+                 round_id=round_id, seed=bytes.fromhex(row["seed"]), commitment=bytes.fromhex(row["commitment"]),
+                 small_blind=row["small_blind"], big_blind=row["big_blind"], buy_in=row["buy_in"],
+-                rake_bps=row["rake_bps"], participants=participants, actions=row["actions"], status="open",
++                rake_bps=row["rake_bps"], participants=participants, actions=row["actions"],
++                status=row["status"], close_tx_hash=row["close_tx_hash"],
++                close_height=row["close_height"], entropy_start=row["entropy_start"],
++                entropy_end=row["entropy_end"],
++                outcome_seed=bytes.fromhex(row["outcome_seed"]) if row["outcome_seed"] else b"",
+             )
+             self.rounds[rnd.id_hex] = rnd
+-            if len(participants) == epoker.NUM_PLAYERS:
++            if len(participants) == epoker.NUM_PLAYERS and rnd.outcome_seed:
                  self._rebuild_engine(rnd)
  
 +    def _resume_custodial_join(self, row: dict) -> str:
@@ -2373,7 +2998,7 @@ index 4014299..c18a226 100644
 +        rnd.participants[address] = Participant(key)
 +        self._persist_participants(rnd)
 +        if len(rnd.participants) == epoker.NUM_PLAYERS:
-+            self._rebuild_engine(rnd)
++            self.prepare_outcome(rnd.id_hex)
 +        self.store.mark_custodial_join("poker", rnd.id_hex, address, "APPLIED", int(time.time()))
 +        return address
 +
@@ -2389,9 +3014,15 @@ index 4014299..c18a226 100644
 +        return recovered
 +
      def _rebuild_engine(self, rnd: PokerRound) -> epoker.PokerEngine:
-         engine = epoker.PokerEngine(rnd.seed, rnd.small_blind, rnd.big_blind, (rnd.buy_in, rnd.buy_in))
+-        engine = epoker.PokerEngine(rnd.seed, rnd.small_blind, rnd.big_blind, (rnd.buy_in, rnd.buy_in))
++        if not rnd.outcome_seed:
++            raise ValueError("round entropy is not ready")
++        engine = epoker.PokerEngine(rnd.outcome_seed, rnd.small_blind, rnd.big_blind,
++                                    (rnd.buy_in, rnd.buy_in))
          for a in rnd.actions:
-@@ -113,11 +162,15 @@ class PokerManager:
+             if engine.finished:
+                 break
+@@ -113,11 +177,16 @@ class PokerManager:
              rnd.result = engine.result
          return engine
  
@@ -2403,12 +3034,13 @@ index 4014299..c18a226 100644
 -        self.bridge.open_poker(self.operator, round_id, commit, small_blind, big_blind, buy_in, rake_bps)
 +        self.bridge.open_poker(
 +            self.operator, round_id, commit, small_blind, big_blind, buy_in, rake_bps,
++            self.operator_bond,
 +            operation_id=f"poker:open:{round_id.hex()}",
 +        )
          rnd = PokerRound(round_id, seed, commit, small_blind, big_blind, buy_in, rake_bps)
          self.rounds[rnd.id_hex] = rnd
          if self.store is not None:
-@@ -125,23 +178,45 @@ class PokerManager:
+@@ -125,30 +194,52 @@ class PokerManager:
                                                small_blind, big_blind, buy_in, rake_bps)
          return rnd
  
@@ -2443,7 +3075,8 @@ index 4014299..c18a226 100644
          rnd.participants[key.address] = Participant(key)
          self._persist_participants(rnd)
          if len(rnd.participants) == epoker.NUM_PLAYERS:
-             self._rebuild_engine(rnd)
+-            self._rebuild_engine(rnd)
++            self.prepare_outcome(rnd.id_hex)
          return key.address
  
 +    @synchronized
@@ -2456,13 +3089,23 @@ index 4014299..c18a226 100644
          if len(rnd.participants) >= epoker.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -158,7 +233,36 @@ class PokerManager:
+         rnd.participants[addr] = Participant(key=None)
+         self._persist_participants(rnd)
+         if len(rnd.participants) == epoker.NUM_PLAYERS:
+-            self._rebuild_engine(rnd)
++            self.prepare_outcome(rnd.id_hex)
+         return addr
+ 
+     def _persist_participants(self, rnd: PokerRound) -> None:
+@@ -158,19 +249,56 @@ class PokerManager:
      def player_index(self, rnd: PokerRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
 -    def apply_action(self, round_id_hex: str, address: str, action: str, amount: int = 0):
 +    def _action_context_unlocked(self, round_id_hex: str) -> dict:
 +        rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed" and not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
 +        engine = self.engines.get(round_id_hex)
 +        state = {
 +            "version": "CANASINO-STATE-V1",
@@ -2494,7 +3137,16 @@ index 4014299..c18a226 100644
          """Validates and applies one betting action. Raises engine.poker.IllegalMove
          on an illegal action, or ValueError if the round/turn state doesn't
          allow one at all. Returns a HandResult once this action ends the
-@@ -171,6 +275,10 @@ class PokerManager:
+         hand, else None."""
+         rnd = self.rounds[round_id_hex]
+-        if rnd.status != "open":
+-            raise ValueError("round not open")
++        if rnd.status != "closed":
++            raise ValueError("round betting is not closed")
++        if not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
+         engine = self.engines.get(round_id_hex)
+         if engine is None:
              raise ValueError("round does not have both players yet")
          if engine.finished:
              raise ValueError("hand already finished")
@@ -2505,15 +3157,66 @@ index 4014299..c18a226 100644
          idx = self.player_index(rnd, address)
          if engine.turn != idx:
              raise ValueError("not this address's turn")
-@@ -198,6 +306,7 @@ class PokerManager:
+@@ -185,6 +313,8 @@ class PokerManager:
+ 
+     def hole_cards_for(self, round_id_hex: str, address: str) -> List[tuple]:
+         rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed" and not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
+         engine = self.engines.get(round_id_hex)
+         if engine is None:
+             return []
+@@ -193,20 +323,59 @@ class PokerManager:
+     def open_round_count(self) -> int:
+         return sum(1 for rnd in self.rounds.values() if rnd.status == "open")
+ 
++    @synchronized
++    def close_betting(self, round_id_hex: str) -> PokerRound:
++        rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed":
++            return rnd
++        if rnd.status != "open" or len(rnd.participants) != epoker.NUM_PLAYERS:
++            raise ValueError("round needs both players before betting closes")
++        tx_hash, close_height = self.bridge.close_poker(
++            self.operator, rnd.round_id, operation_id=f"poker:close:{rnd.id_hex}",
++        )
++        rnd.status = "closed"
++        rnd.close_tx_hash = tx_hash
++        rnd.close_height = close_height
++        rnd.entropy_start, rnd.entropy_end = entropy_bounds(close_height)
++        if self.store is not None:
++            self.store.update_round_fairness("poker", rnd.id_hex, rnd.status, tx_hash,
++                                             close_height, rnd.entropy_start, rnd.entropy_end, "")
++        return rnd
++
++    @synchronized
++    def prepare_outcome(self, round_id_hex: str,
++                        timeout: float = DEFAULT_ENTROPY_WAIT_TIMEOUT) -> PokerRound:
++        rnd = self.close_betting(round_id_hex)
++        if not rnd.outcome_seed:
++            wait_and_derive(rnd, self.bridge, timeout=timeout)
++            self._rebuild_engine(rnd)
++            if self.store is not None:
++                self.store.update_round_fairness(
++                    "poker", rnd.id_hex, rnd.status, rnd.close_tx_hash, rnd.close_height,
++                    rnd.entropy_start, rnd.entropy_end, rnd.outcome_seed.hex(),
++                )
++        return rnd
++
+     def locked_for(self, address: str) -> int:
+         addr = address.lower()
          return sum(rnd.buy_in for rnd in self.rounds.values()
-                    if rnd.status == "open" and addr in rnd.participants)
+-                   if rnd.status == "open" and addr in rnd.participants)
++                   if rnd.status in ("open", "closed") and addr in rnd.participants)
  
 +    @settled_once
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
++        if not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
          engine = self.engines[round_id_hex]
-@@ -206,7 +315,10 @@ class PokerManager:
+         if not engine.finished:
+             raise ValueError("hand is not finished yet")
          order = rnd.player_order
          before = {a: self.bridge.account_balance(a) for a in order}
          proto_actions = [(a["action"], a["amount"]) for a in rnd.actions]
@@ -2526,7 +3229,7 @@ index 4014299..c18a226 100644
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/rooms.py b/gameserver/rooms.py
-index 12b56c4..5c19075 100644
+index 12b56c4..cd9686a 100644
 --- a/gameserver/rooms.py
 +++ b/gameserver/rooms.py
 @@ -14,7 +14,11 @@ operator/player keys needed to sign a settle for that round.
@@ -2541,25 +3244,42 @@ index 12b56c4..5c19075 100644
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
  
-@@ -23,6 +27,9 @@ from engine.rng import derive_seed, commitment
+@@ -23,6 +27,10 @@ from engine.rng import derive_seed, commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
++from .fairness import DEFAULT_ENTROPY_WAIT_TIMEOUT, entropy_bounds, wait_and_derive
 +from .synchronization import synchronized, settled_once
 +
 +logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -65,12 +72,15 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -45,6 +53,11 @@ class Round:
+     status: str = "open"
+     settle_tx_hash: str = ""
+     settle_height: int = 0
++    close_tx_hash: str = ""
++    close_height: int = 0
++    entropy_start: int = 0
++    entropy_end: int = 0
++    outcome_seed: bytes = b""
+ 
+     @property
+     def id_hex(self) -> str:
+@@ -64,13 +77,18 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+ 
  
  class RoomManager:
-     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
+-    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None,
++                 operator_bond: int = 1_000_000):
 +        self._state_lock = RLock()
 +        self._settled_results = {}
          self.bridge = bridge
          self.operator = operator
          self.store = store
++        self.operator_bond = operator_bond
          self.rounds: Dict[str, Round] = {}
          if self.store is not None:
              self._reconcile_open_rounds()
@@ -2567,7 +3287,15 @@ index 12b56c4..5c19075 100644
  
      def _reconcile_open_rounds(self) -> None:
          """Reload any round that was still open when the process last stopped,
-@@ -93,13 +103,53 @@ class RoomManager:
+@@ -89,43 +107,114 @@ class RoomManager:
+                 round_id=round_id, seed=bytes.fromhex(row["seed"]), commitment=bytes.fromhex(row["commitment"]),
+                 entry_fee=row["entry_fee"], rake_bps=row["rake_bps"],
+                 payout_weights_bps=row["payout_weights_bps"], order=row["order"], room=row["room"] or "",
+-                participants=participants, status="open",
++                participants=participants, status=row["status"],
++                close_tx_hash=row["close_tx_hash"], close_height=row["close_height"],
++                entropy_start=row["entropy_start"], entropy_end=row["entropy_end"],
++                outcome_seed=bytes.fromhex(row["outcome_seed"]) if row["outcome_seed"] else b"",
              )
              self.rounds[rnd.id_hex] = rnd
  
@@ -2618,11 +3346,14 @@ index 12b56c4..5c19075 100644
          commit = commitment(seed)
          self.bridge.open_room(self.operator, round_id, commit, entry_fee, rake_bps,
 -                              list(payout_weights_bps))
-+                              list(payout_weights_bps), operation_id=f"bingo:open:{round_id.hex()}")
++                              list(payout_weights_bps), self.operator_bond,
++                              operation_id=f"bingo:open:{round_id.hex()}")
          rnd = Round(round_id, seed, commit, entry_fee, rake_bps, list(payout_weights_bps),
-                     order=edraw.draw_order(seed), room=room)
+-                    order=edraw.draw_order(seed), room=room)
++                    order=[], room=room)
          self.rounds[rnd.id_hex] = rnd
-@@ -108,24 +158,51 @@ class RoomManager:
+         if self.store is not None:
+             self.store.save_open_round(rnd.id_hex, seed.hex(), commit.hex(), entry_fee, rake_bps,
                                         list(payout_weights_bps), room, rnd.order)
          return rnd
  
@@ -2677,7 +3408,60 @@ index 12b56c4..5c19075 100644
          rnd.participants[address.lower()] = Participant(key=None, num_cards=num_cards)
          self._persist_participants(rnd)
          return address.lower()
-@@ -172,10 +249,16 @@ class RoomManager:
+@@ -135,7 +224,42 @@ class RoomManager:
+             self.store.update_round_participants(rnd.id_hex, _serialize_participants(rnd.participants))
+ 
+     def cards_for(self, rnd: Round, addr: str, num_cards: int):
+-        return ecard.generate_cards(derive_seed(rnd.seed, bytes.fromhex(addr)), num_cards)
++        if not rnd.outcome_seed:
++            raise ValueError("round entropy is not ready")
++        return ecard.generate_cards(derive_seed(rnd.outcome_seed, bytes.fromhex(addr)), num_cards)
++
++    @synchronized
++    def close_betting(self, round_id_hex: str) -> Round:
++        rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed":
++            return rnd
++        if rnd.status != "open":
++            raise ValueError("round not open")
++        tx_hash, close_height = self.bridge.close_room(
++            self.operator, rnd.round_id, operation_id=f"bingo:close:{rnd.id_hex}",
++        )
++        rnd.status = "closed"
++        rnd.close_tx_hash = tx_hash
++        rnd.close_height = close_height
++        rnd.entropy_start, rnd.entropy_end = entropy_bounds(close_height)
++        if self.store is not None:
++            self.store.update_round_fairness("bingo", rnd.id_hex, rnd.status, tx_hash,
++                                             close_height, rnd.entropy_start, rnd.entropy_end, "")
++        return rnd
++
++    @synchronized
++    def prepare_outcome(self, round_id_hex: str,
++                        timeout: float = DEFAULT_ENTROPY_WAIT_TIMEOUT) -> Round:
++        rnd = self.close_betting(round_id_hex)
++        if not rnd.outcome_seed:
++            wait_and_derive(rnd, self.bridge, timeout=timeout)
++            rnd.order = edraw.draw_order(rnd.outcome_seed)
++            if self.store is not None:
++                self.store.update_round_fairness(
++                    "bingo", rnd.id_hex, rnd.status, rnd.close_tx_hash, rnd.close_height,
++                    rnd.entropy_start, rnd.entropy_end, rnd.outcome_seed.hex(), order=rnd.order,
++                )
++        return rnd
+ 
+     def open_round_count(self, room: str | None = None) -> int:
+         """How many rounds are currently open, optionally scoped to one room
+@@ -153,7 +277,7 @@ class RoomManager:
+         addr = address.lower()
+         total = 0
+         for rnd in self.rounds.values():
+-            if rnd.status != "open":
++            if rnd.status not in ("open", "closed"):
+                 continue
+             p = rnd.participants.get(addr)
+             if p is not None:
+@@ -172,10 +296,18 @@ class RoomManager:
                  out.append(addr)
          return out
  
@@ -2686,6 +3470,8 @@ index 12b56c4..5c19075 100644
 +        if pattern != "line":
 +            raise ValueError("round pattern is fixed to line")
          rnd = self.rounds[round_id_hex]
++        if not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
          before = {a: self.bridge.account_balance(a) for a in rnd.participants}
 -        tx_hash = self.bridge.settle_room(self.operator, rnd.round_id, rnd.seed, pattern)
 +        tx_hash = self.bridge.settle_room(
@@ -2696,7 +3482,7 @@ index 12b56c4..5c19075 100644
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/roulette_rooms.py b/gameserver/roulette_rooms.py
-index d44c9d7..146dfcd 100644
+index d44c9d7..6e58db4 100644
 --- a/gameserver/roulette_rooms.py
 +++ b/gameserver/roulette_rooms.py
 @@ -15,7 +15,10 @@ escrowed bets with no key left able to sign the settle.
@@ -2710,25 +3496,42 @@ index d44c9d7..146dfcd 100644
  import time
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
-@@ -25,6 +28,9 @@ from engine.rng import commitment
+@@ -25,6 +28,10 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
++from .fairness import DEFAULT_ENTROPY_WAIT_TIMEOUT, entropy_bounds, wait_and_derive
 +from .synchronization import synchronized, settled_once
 +
 +logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -67,12 +73,15 @@ def _serialize_bets(bets: Dict[str, Bet]) -> dict:
+@@ -47,6 +54,11 @@ class RouletteRound:
+     settle_tx_hash: str = ""
+     settle_height: int = 0
+     spin: Optional[int] = None
++    close_tx_hash: str = ""
++    close_height: int = 0
++    entropy_start: int = 0
++    entropy_end: int = 0
++    outcome_seed: bytes = b""
+ 
+     @property
+     def id_hex(self) -> str:
+@@ -66,13 +78,18 @@ def _serialize_bets(bets: Dict[str, Bet]) -> dict:
+ 
  
  class RouletteManager:
-     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
+-    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++    def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None,
++                 operator_bond: int = 1_000_000):
 +        self._state_lock = RLock()
 +        self._settled_results = {}
          self.bridge = bridge
          self.operator = operator
          self.store = store
++        self.operator_bond = operator_bond
          self.rounds: Dict[str, RouletteRound] = {}
          if self.store is not None:
              self._reconcile_open_rounds()
@@ -2736,7 +3539,15 @@ index d44c9d7..146dfcd 100644
  
      def _reconcile_open_rounds(self) -> None:
          for row in self.store.load_open_roulette_rounds():
-@@ -91,30 +100,89 @@ class RouletteManager:
+@@ -87,34 +104,96 @@ class RouletteManager:
+             round_id = bytes.fromhex(row["round_id"])
+             rnd = RouletteRound(
+                 round_id=round_id, seed=bytes.fromhex(row["seed"]), commitment=bytes.fromhex(row["commitment"]),
+-                rake_bps=row["rake_bps"], bets=bets, status="open",
++                rake_bps=row["rake_bps"], bets=bets, status=row["status"],
++                close_tx_hash=row["close_tx_hash"], close_height=row["close_height"],
++                entropy_start=row["entropy_start"], entropy_end=row["entropy_end"],
++                outcome_seed=bytes.fromhex(row["outcome_seed"]) if row["outcome_seed"] else b"",
              )
              self.rounds[rnd.id_hex] = rnd
  
@@ -2786,7 +3597,7 @@ index d44c9d7..146dfcd 100644
          round_id = secrets.token_bytes(8)
          commit = commitment(seed)
 -        self.bridge.open_roulette(self.operator, round_id, commit, rake_bps)
-+        self.bridge.open_roulette(self.operator, round_id, commit, rake_bps,
++        self.bridge.open_roulette(self.operator, round_id, commit, rake_bps, self.operator_bond,
 +                                  operation_id=f"roulette:open:{round_id.hex()}")
          rnd = RouletteRound(round_id, seed, commit, rake_bps, opened_at=time.time())
          self.rounds[rnd.id_hex] = rnd
@@ -2830,7 +3641,7 @@ index d44c9d7..146dfcd 100644
      def register_external_bet(self, round_id_hex: str, address: str, bet_type: str,
                                bet_number: int, amount: int) -> str:
          """Record a bettor who bet on-chain from their OWN wallet. The server
-@@ -122,6 +190,13 @@ class RouletteManager:
+@@ -122,6 +201,13 @@ class RouletteManager:
          chain itself pays from its own bet records, so this is bookkeeping
          only (needed to report this address's delta after settle)."""
          rnd = self.rounds[round_id_hex]
@@ -2844,13 +3655,59 @@ index d44c9d7..146dfcd 100644
          rnd.bets[address.lower()] = Bet(key=None, bet_type=bet_type, bet_number=bet_number, amount=amount)
          self._persist_bets(rnd)
          return address.lower()
-@@ -144,10 +219,14 @@ class RouletteManager:
+@@ -133,26 +219,64 @@ class RouletteManager:
+     def open_round_count(self) -> int:
+         return sum(1 for rnd in self.rounds.values() if rnd.status == "open")
+ 
++    @synchronized
++    def close_betting(self, round_id_hex: str) -> RouletteRound:
++        rnd = self.rounds[round_id_hex]
++        if rnd.status == "closed":
++            return rnd
++        if rnd.status != "open":
++            raise ValueError("round not open")
++        tx_hash, close_height = self.bridge.close_roulette(
++            self.operator, rnd.round_id, operation_id=f"roulette:close:{rnd.id_hex}",
++        )
++        rnd.status = "closed"
++        rnd.close_tx_hash = tx_hash
++        rnd.close_height = close_height
++        rnd.entropy_start, rnd.entropy_end = entropy_bounds(close_height)
++        if self.store is not None:
++            self.store.update_round_fairness("roulette", rnd.id_hex, rnd.status, tx_hash,
++                                             close_height, rnd.entropy_start, rnd.entropy_end, "")
++        return rnd
++
++    @synchronized
++    def prepare_outcome(self, round_id_hex: str,
++                        timeout: float = DEFAULT_ENTROPY_WAIT_TIMEOUT) -> RouletteRound:
++        rnd = self.close_betting(round_id_hex)
++        if not rnd.outcome_seed:
++            wait_and_derive(rnd, self.bridge, timeout=timeout)
++            if self.store is not None:
++                self.store.update_round_fairness(
++                    "roulette", rnd.id_hex, rnd.status, rnd.close_tx_hash, rnd.close_height,
++                    rnd.entropy_start, rnd.entropy_end, rnd.outcome_seed.hex(),
++                )
++        return rnd
++
+     def locked_for(self, address: str) -> int:
+         addr = address.lower()
+         total = 0
+         for rnd in self.rounds.values():
+-            if rnd.status != "open":
++            if rnd.status not in ("open", "closed"):
+                 continue
+             b = rnd.bets.get(addr)
+             if b is not None:
                  total += b.amount
          return total
  
 +    @settled_once
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
++        if not rnd.outcome_seed:
++            self.prepare_outcome(round_id_hex)
          before = {a: self.bridge.account_balance(a) for a in rnd.bets}
 -        tx_hash = self.bridge.settle_roulette(self.operator, rnd.round_id, rnd.seed)
 +        tx_hash = self.bridge.settle_roulette(
@@ -2860,6 +3717,12 @@ index d44c9d7..146dfcd 100644
          after = {a: self.bridge.account_balance(a) for a in rnd.bets}
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
+         rnd.settle_height = self.bridge.height()  # approximate; the tx hash is the real proof
+-        rnd.spin = eroulette.spin_number(rnd.seed)
++        rnd.spin = eroulette.spin_number(rnd.outcome_seed)
+         payouts = {a: after[a] - before[a] for a in rnd.bets}
+         if self.store is not None:
+             self.store.record_roulette_settle(round_id_hex, rnd.rake_bps, rnd.spin, payouts, tx_hash)
 diff --git a/gameserver/security.py b/gameserver/security.py
 new file mode 100644
 index 0000000..38b161d
@@ -2971,7 +3834,7 @@ index 0000000..38b161d
 +        return await self.app(scope, receive, send)
 diff --git a/gameserver/synchronization.py b/gameserver/synchronization.py
 new file mode 100644
-index 0000000..e1b30cc
+index 0000000..15b915a
 --- /dev/null
 +++ b/gameserver/synchronization.py
 @@ -0,0 +1,31 @@
@@ -3000,12 +3863,173 @@ index 0000000..e1b30cc
 +            if round_id_hex in self._settled_results:
 +                return deepcopy(self._settled_results[round_id_hex])
 +            rnd = self.rounds[round_id_hex]
-+            if rnd.status != "open":
-+                raise ValueError("round is not open; settlement needs reconciliation")
++            if rnd.status not in ("open", "closed"):
++                raise ValueError("round cannot be settled; settlement needs reconciliation")
 +            result = method(self, round_id_hex, *args, **kwargs)
 +            self._settled_results[round_id_hex] = deepcopy(result)
 +            return result
 +    return call
+diff --git a/gameserver/tx_pb2.py b/gameserver/tx_pb2.py
+index b9a3805..d55c1fa 100644
+--- a/gameserver/tx_pb2.py
++++ b/gameserver/tx_pb2.py
+@@ -1,7 +1,7 @@
+ # -*- coding: utf-8 -*-
+ # Generated by the protocol buffer compiler.  DO NOT EDIT!
+ # source: tx.proto
+-# Protobuf Python Version: 4.25.1
++# Protobuf Python Version: 4.25.0
+ """Generated protocol buffer code."""
+ from google.protobuf import descriptor as _descriptor
+ from google.protobuf import descriptor_pool as _descriptor_pool
+@@ -15,7 +15,7 @@ _sym_db = _symbol_database.Default()
+ from google.protobuf import any_pb2 as google_dot_protobuf_dot_any__pb2
+ 
+ 
+-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x08tx.proto\x12\x05types\x1a\x19google/protobuf/any.proto\"\xe1\x01\n\x0bTransaction\x12\x14\n\x0cmessage_type\x18\x01 \x01(\t\x12!\n\x03msg\x18\x02 \x01(\x0b\x32\x14.google.protobuf.Any\x12#\n\tsignature\x18\x03 \x01(\x0b\x32\x10.types.Signature\x12\x16\n\x0e\x63reated_height\x18\x04 \x01(\x04\x12\x0c\n\x04time\x18\x05 \x01(\x04\x12\x0b\n\x03\x66\x65\x65\x18\x06 \x01(\x04\x12\x0c\n\x04memo\x18\x07 \x01(\t\x12\x12\n\nnetwork_id\x18\x08 \x01(\x04\x12\x10\n\x08\x63hain_id\x18\t \x01(\x04\x12\r\n\x05nonce\x18\n \x01(\x04\"G\n\x0bMessageSend\x12\x14\n\x0c\x66rom_address\x18\x01 \x01(\x0c\x12\x12\n\nto_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"\x1d\n\tFeeParams\x12\x10\n\x08send_fee\x18\x01 \x01(\x04\"2\n\tSignature\x12\x12\n\npublic_key\x18\x01 \x01(\x0c\x12\x11\n\tsignature\x18\x02 \x01(\x0c\"Q\n\rMessageReward\x12\x15\n\radmin_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"R\n\rMessageFaucet\x12\x16\n\x0esigner_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"H\n\x06\x46\x61ucet\x12\x19\n\x11recipient_address\x18\x01 \x01(\x0c\x12\x14\n\x0ctotal_amount\x18\x02 \x01(\x04\x12\r\n\x05\x63ount\x18\x03 \x01(\x04\"d\n\x06Reward\x12\x19\n\x11recipient_address\x18\x01 \x01(\x0c\x12\x1a\n\x12last_admin_address\x18\x02 \x01(\x0c\x12\x14\n\x0ctotal_amount\x18\x03 \x01(\x04\x12\r\n\x05\x63ount\x18\x04 \x01(\x04\"\x92\x01\n\x0fMessageOpenRoom\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x1a\n\x12payout_weights_bps\x18\x06 \x03(\x04\"^\n\x0fMessageJoinRoom\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x11\n\tnum_cards\x18\x03 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x04 \x01(\x04\"\x8b\x01\n\x11MessageSettleRoom\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\x12\x16\n\x0ewinner_address\x18\x04 \x01(\x0c\x12\x13\n\x0b\x62\x61lls_drawn\x18\x05 \x01(\x04\x12\x0f\n\x07pattern\x18\x06 \x01(\t\"=\n\x11MessageExpireRoom\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\x9c\x02\n\tRoomRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x14\n\x0c\x65scrow_total\x18\x06 \x01(\x04\x12\x13\n\x0bnum_players\x18\x07 \x01(\x04\x12\x0e\n\x06status\x18\x08 \x01(\r\x12\x1d\n\x15participant_addresses\x18\t \x03(\x0c\x12\x1d\n\x15participant_num_cards\x18\n \x03(\x04\x12\x1a\n\x12payout_weights_bps\x18\x0b \x03(\x04\x12\x15\n\ropened_height\x18\x0c \x01(\x04\"^\n\x0fRoomParticipant\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x16\n\x0eplayer_address\x18\x02 \x01(\x0c\x12\x11\n\tnum_cards\x18\x03 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x04 \x01(\x04\"S\n\x0fMessageBuyCoins\x12\x15\n\radmin_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"R\n\x0eMessageBuyGems\x12\x15\n\radmin_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"O\n\x13MessageTransferGems\x12\x14\n\x0c\x66rom_address\x18\x01 \x01(\x0c\x12\x12\n\nto_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"f\n\x13MessageMintCosmetic\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08token_id\x18\x02 \x01(\x0c\x12\x0c\n\x04kind\x18\x03 \x01(\t\x12\x15\n\rowner_address\x18\x04 \x01(\x0c\"L\n\x12MessageBuyCosmetic\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08token_id\x18\x02 \x01(\x0c\x12\x0c\n\x04kind\x18\x03 \x01(\t\"U\n\x17MessageTransferCosmetic\x12\x14\n\x0c\x66rom_address\x18\x01 \x01(\x0c\x12\x12\n\nto_address\x18\x02 \x01(\x0c\x12\x10\n\x08token_id\x18\x03 \x01(\x0c\"-\n\nGemBalance\x12\x0f\n\x07\x61\x64\x64ress\x18\x01 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x04\"A\n\x08\x43osmetic\x12\x10\n\x08token_id\x18\x01 \x01(\x0c\x12\x0c\n\x04kind\x18\x02 \x01(\t\x12\x15\n\rowner_address\x18\x03 \x01(\x0c\"g\n\x13MessageOpenRoulette\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x10\n\x08rake_bps\x18\x04 \x01(\x04\"t\n\x12MessageRouletteBet\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x10\n\x08\x62\x65t_type\x18\x03 \x01(\t\x12\x12\n\nbet_number\x18\x04 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x05 \x01(\x04\"Q\n\x15MessageSettleRoulette\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\"A\n\x15MessageExpireRoulette\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\xd1\x01\n\rRouletteRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x10\n\x08rake_bps\x18\x04 \x01(\x04\x12\x11\n\tpot_total\x18\x05 \x01(\x04\x12\x0e\n\x06status\x18\x06 \x01(\r\x12\x18\n\x10\x62\x65ttor_addresses\x18\x07 \x03(\x0c\x12\x15\n\ropened_height\x18\x08 \x01(\x04\x12\x0c\n\x04seed\x18\t \x01(\x0c\x12\x0c\n\x04spin\x18\n \x01(\r\"s\n\x11RouletteBetRecord\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x16\n\x0eplayer_address\x18\x02 \x01(\x0c\x12\x10\n\x08\x62\x65t_type\x18\x03 \x01(\t\x12\x12\n\nbet_number\x18\x04 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x05 \x01(\x04\"x\n\x11MessageOpenDomino\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\"M\n\x11MessageJoinDomino\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"T\n\x10\x44ominoMoveRecord\x12\x0e\n\x06\x61\x63tion\x18\x01 \x01(\t\x12\x10\n\x08tile_low\x18\x02 \x01(\r\x12\x11\n\ttile_high\x18\x03 \x01(\r\x12\x0b\n\x03\x65nd\x18\x04 \x01(\t\"w\n\x13MessageSettleDomino\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\x12&\n\x05moves\x18\x04 \x03(\x0b\x32\x17.types.DominoMoveRecord\"?\n\x13MessageExpireDomino\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\x89\x02\n\x0b\x44ominoRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x14\n\x0c\x65scrow_total\x18\x06 \x01(\x04\x12\x0e\n\x06status\x18\x07 \x01(\r\x12\x1d\n\x15participant_addresses\x18\x08 \x03(\x0c\x12\x15\n\ropened_height\x18\t \x01(\x04\x12\x0c\n\x04seed\x18\n \x01(\x0c\x12\x14\n\x0cwinner_slots\x18\x0b \x03(\r\x12\x15\n\rresult_reason\x18\x0c \x01(\t\"\x9c\x01\n\x10MessageOpenPoker\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x13\n\x0bsmall_blind\x18\x04 \x01(\x04\x12\x11\n\tbig_blind\x18\x05 \x01(\x04\x12\x0e\n\x06\x62uy_in\x18\x06 \x01(\x04\x12\x10\n\x08rake_bps\x18\x07 \x01(\x04\"L\n\x10MessageJoinPoker\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"3\n\x11PokerActionRecord\x12\x0e\n\x06\x61\x63tion\x18\x01 \x01(\t\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x04\"y\n\x12MessageSettlePoker\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\x12)\n\x07\x61\x63tions\x18\x04 \x03(\x0b\x32\x18.types.PokerActionRecord\">\n\x12MessageExpirePoker\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\xad\x02\n\nPokerRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x13\n\x0bsmall_blind\x18\x04 \x01(\x04\x12\x11\n\tbig_blind\x18\x05 \x01(\x04\x12\x0e\n\x06\x62uy_in\x18\x06 \x01(\x04\x12\x10\n\x08rake_bps\x18\x07 \x01(\x04\x12\x14\n\x0c\x65scrow_total\x18\x08 \x01(\x04\x12\x0e\n\x06status\x18\t \x01(\r\x12\x1d\n\x15participant_addresses\x18\n \x03(\x0c\x12\x15\n\ropened_height\x18\x0b \x01(\x04\x12\x0c\n\x04seed\x18\x0c \x01(\x0c\x12\x14\n\x0cwinner_slots\x18\r \x03(\r\x12\x15\n\rresult_reason\x18\x0e \x01(\tB.Z,github.com/canopy-network/go-plugin/contractb\x06proto3')
++DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x08tx.proto\x12\x05types\x1a\x19google/protobuf/any.proto\"\xe1\x01\n\x0bTransaction\x12\x14\n\x0cmessage_type\x18\x01 \x01(\t\x12!\n\x03msg\x18\x02 \x01(\x0b\x32\x14.google.protobuf.Any\x12#\n\tsignature\x18\x03 \x01(\x0b\x32\x10.types.Signature\x12\x16\n\x0e\x63reated_height\x18\x04 \x01(\x04\x12\x0c\n\x04time\x18\x05 \x01(\x04\x12\x0b\n\x03\x66\x65\x65\x18\x06 \x01(\x04\x12\x0c\n\x04memo\x18\x07 \x01(\t\x12\x12\n\nnetwork_id\x18\x08 \x01(\x04\x12\x10\n\x08\x63hain_id\x18\t \x01(\x04\x12\r\n\x05nonce\x18\n \x01(\x04\"G\n\x0bMessageSend\x12\x14\n\x0c\x66rom_address\x18\x01 \x01(\x0c\x12\x12\n\nto_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"\x1d\n\tFeeParams\x12\x10\n\x08send_fee\x18\x01 \x01(\x04\"2\n\tSignature\x12\x12\n\npublic_key\x18\x01 \x01(\x0c\x12\x11\n\tsignature\x18\x02 \x01(\x0c\"Q\n\rMessageReward\x12\x15\n\radmin_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"R\n\rMessageFaucet\x12\x16\n\x0esigner_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"H\n\x06\x46\x61ucet\x12\x19\n\x11recipient_address\x18\x01 \x01(\x0c\x12\x14\n\x0ctotal_amount\x18\x02 \x01(\x04\x12\r\n\x05\x63ount\x18\x03 \x01(\x04\"d\n\x06Reward\x12\x19\n\x11recipient_address\x18\x01 \x01(\x0c\x12\x1a\n\x12last_admin_address\x18\x02 \x01(\x0c\x12\x14\n\x0ctotal_amount\x18\x03 \x01(\x04\x12\r\n\x05\x63ount\x18\x04 \x01(\x04\"\xa9\x01\n\x0fMessageOpenRoom\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x1a\n\x12payout_weights_bps\x18\x06 \x03(\x04\x12\x15\n\roperator_bond\x18\x07 \x01(\x04\">\n\x10MessageCloseRoom\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"^\n\x0fMessageJoinRoom\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x11\n\tnum_cards\x18\x03 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x04 \x01(\x04\"\x8b\x01\n\x11MessageSettleRoom\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\x12\x16\n\x0ewinner_address\x18\x04 \x01(\x0c\x12\x13\n\x0b\x62\x61lls_drawn\x18\x05 \x01(\x04\x12\x0f\n\x07pattern\x18\x06 \x01(\t\"=\n\x11MessageExpireRoom\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\xf5\x02\n\tRoomRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x14\n\x0c\x65scrow_total\x18\x06 \x01(\x04\x12\x13\n\x0bnum_players\x18\x07 \x01(\x04\x12\x0e\n\x06status\x18\x08 \x01(\r\x12\x1d\n\x15participant_addresses\x18\t \x03(\x0c\x12\x1d\n\x15participant_num_cards\x18\n \x03(\x04\x12\x1a\n\x12payout_weights_bps\x18\x0b \x03(\x04\x12\x15\n\ropened_height\x18\x0c \x01(\x04\x12\x15\n\roperator_bond\x18\r \x01(\x04\x12\x14\n\x0c\x63lose_height\x18\x0e \x01(\x04\x12\x15\n\rentropy_start\x18\x0f \x01(\x04\x12\x13\n\x0b\x65ntropy_end\x18\x10 \x01(\x04\"^\n\x0fRoomParticipant\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x16\n\x0eplayer_address\x18\x02 \x01(\x0c\x12\x11\n\tnum_cards\x18\x03 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x04 \x01(\x04\"S\n\x0fMessageBuyCoins\x12\x15\n\radmin_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"R\n\x0eMessageBuyGems\x12\x15\n\radmin_address\x18\x01 \x01(\x0c\x12\x19\n\x11recipient_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"O\n\x13MessageTransferGems\x12\x14\n\x0c\x66rom_address\x18\x01 \x01(\x0c\x12\x12\n\nto_address\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"f\n\x13MessageMintCosmetic\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08token_id\x18\x02 \x01(\x0c\x12\x0c\n\x04kind\x18\x03 \x01(\t\x12\x15\n\rowner_address\x18\x04 \x01(\x0c\"L\n\x12MessageBuyCosmetic\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08token_id\x18\x02 \x01(\x0c\x12\x0c\n\x04kind\x18\x03 \x01(\t\"U\n\x17MessageTransferCosmetic\x12\x14\n\x0c\x66rom_address\x18\x01 \x01(\x0c\x12\x12\n\nto_address\x18\x02 \x01(\x0c\x12\x10\n\x08token_id\x18\x03 \x01(\x0c\"-\n\nGemBalance\x12\x0f\n\x07\x61\x64\x64ress\x18\x01 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x04\"A\n\x08\x43osmetic\x12\x10\n\x08token_id\x18\x01 \x01(\x0c\x12\x0c\n\x04kind\x18\x02 \x01(\t\x12\x15\n\rowner_address\x18\x03 \x01(\x0c\"~\n\x13MessageOpenRoulette\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x10\n\x08rake_bps\x18\x04 \x01(\x04\x12\x15\n\roperator_bond\x18\x05 \x01(\x04\"B\n\x14MessageCloseRoulette\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"t\n\x12MessageRouletteBet\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x10\n\x08\x62\x65t_type\x18\x03 \x01(\t\x12\x12\n\nbet_number\x18\x04 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x05 \x01(\x04\"Q\n\x15MessageSettleRoulette\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\"A\n\x15MessageExpireRoulette\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\xaa\x02\n\rRouletteRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x10\n\x08rake_bps\x18\x04 \x01(\x04\x12\x11\n\tpot_total\x18\x05 \x01(\x04\x12\x0e\n\x06status\x18\x06 \x01(\r\x12\x18\n\x10\x62\x65ttor_addresses\x18\x07 \x03(\x0c\x12\x15\n\ropened_height\x18\x08 \x01(\x04\x12\x0c\n\x04seed\x18\t \x01(\x0c\x12\x0c\n\x04spin\x18\n \x01(\r\x12\x15\n\roperator_bond\x18\x0b \x01(\x04\x12\x14\n\x0c\x63lose_height\x18\x0c \x01(\x04\x12\x15\n\rentropy_start\x18\r \x01(\x04\x12\x13\n\x0b\x65ntropy_end\x18\x0e \x01(\x04\"s\n\x11RouletteBetRecord\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x16\n\x0eplayer_address\x18\x02 \x01(\x0c\x12\x10\n\x08\x62\x65t_type\x18\x03 \x01(\t\x12\x12\n\nbet_number\x18\x04 \x01(\x04\x12\x0e\n\x06\x61mount\x18\x05 \x01(\x04\"\x8f\x01\n\x11MessageOpenDomino\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x15\n\roperator_bond\x18\x06 \x01(\x04\"@\n\x12MessageCloseDomino\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"M\n\x11MessageJoinDomino\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"T\n\x10\x44ominoMoveRecord\x12\x0e\n\x06\x61\x63tion\x18\x01 \x01(\t\x12\x10\n\x08tile_low\x18\x02 \x01(\r\x12\x11\n\ttile_high\x18\x03 \x01(\r\x12\x0b\n\x03\x65nd\x18\x04 \x01(\t\"w\n\x13MessageSettleDomino\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\x12&\n\x05moves\x18\x04 \x03(\x0b\x32\x17.types.DominoMoveRecord\"?\n\x13MessageExpireDomino\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\xe2\x02\n\x0b\x44ominoRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x11\n\tentry_fee\x18\x04 \x01(\x04\x12\x10\n\x08rake_bps\x18\x05 \x01(\x04\x12\x14\n\x0c\x65scrow_total\x18\x06 \x01(\x04\x12\x0e\n\x06status\x18\x07 \x01(\r\x12\x1d\n\x15participant_addresses\x18\x08 \x03(\x0c\x12\x15\n\ropened_height\x18\t \x01(\x04\x12\x0c\n\x04seed\x18\n \x01(\x0c\x12\x14\n\x0cwinner_slots\x18\x0b \x03(\r\x12\x15\n\rresult_reason\x18\x0c \x01(\t\x12\x15\n\roperator_bond\x18\r \x01(\x04\x12\x14\n\x0c\x63lose_height\x18\x0e \x01(\x04\x12\x15\n\rentropy_start\x18\x0f \x01(\x04\x12\x13\n\x0b\x65ntropy_end\x18\x10 \x01(\x04\"\xb3\x01\n\x10MessageOpenPoker\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x13\n\x0bsmall_blind\x18\x04 \x01(\x04\x12\x11\n\tbig_blind\x18\x05 \x01(\x04\x12\x0e\n\x06\x62uy_in\x18\x06 \x01(\x04\x12\x10\n\x08rake_bps\x18\x07 \x01(\x04\x12\x15\n\roperator_bond\x18\x08 \x01(\x04\"?\n\x11MessageClosePoker\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"L\n\x10MessageJoinPoker\x12\x16\n\x0eplayer_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x04\"3\n\x11PokerActionRecord\x12\x0e\n\x06\x61\x63tion\x18\x01 \x01(\t\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x04\"y\n\x12MessageSettlePoker\x12\x18\n\x10operator_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\x12\x0c\n\x04seed\x18\x03 \x01(\x0c\x12)\n\x07\x61\x63tions\x18\x04 \x03(\x0b\x32\x18.types.PokerActionRecord\">\n\x12MessageExpirePoker\x12\x16\n\x0e\x63\x61ller_address\x18\x01 \x01(\x0c\x12\x10\n\x08round_id\x18\x02 \x01(\x0c\"\x86\x03\n\nPokerRound\x12\x10\n\x08round_id\x18\x01 \x01(\x0c\x12\x18\n\x10operator_address\x18\x02 \x01(\x0c\x12\x12\n\ncommitment\x18\x03 \x01(\x0c\x12\x13\n\x0bsmall_blind\x18\x04 \x01(\x04\x12\x11\n\tbig_blind\x18\x05 \x01(\x04\x12\x0e\n\x06\x62uy_in\x18\x06 \x01(\x04\x12\x10\n\x08rake_bps\x18\x07 \x01(\x04\x12\x14\n\x0c\x65scrow_total\x18\x08 \x01(\x04\x12\x0e\n\x06status\x18\t \x01(\r\x12\x1d\n\x15participant_addresses\x18\n \x03(\x0c\x12\x15\n\ropened_height\x18\x0b \x01(\x04\x12\x0c\n\x04seed\x18\x0c \x01(\x0c\x12\x14\n\x0cwinner_slots\x18\r \x03(\r\x12\x15\n\rresult_reason\x18\x0e \x01(\t\x12\x15\n\roperator_bond\x18\x0f \x01(\x04\x12\x14\n\x0c\x63lose_height\x18\x10 \x01(\x04\x12\x15\n\rentropy_start\x18\x11 \x01(\x04\x12\x13\n\x0b\x65ntropy_end\x18\x12 \x01(\x04\x42.Z,github.com/canopy-network/go-plugin/contractb\x06proto3')
+ 
+ _globals = globals()
+ _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
+@@ -40,67 +40,75 @@ if _descriptor._USE_C_DESCRIPTORS == False:
+   _globals['_REWARD']._serialized_start=671
+   _globals['_REWARD']._serialized_end=771
+   _globals['_MESSAGEOPENROOM']._serialized_start=774
+-  _globals['_MESSAGEOPENROOM']._serialized_end=920
+-  _globals['_MESSAGEJOINROOM']._serialized_start=922
+-  _globals['_MESSAGEJOINROOM']._serialized_end=1016
+-  _globals['_MESSAGESETTLEROOM']._serialized_start=1019
+-  _globals['_MESSAGESETTLEROOM']._serialized_end=1158
+-  _globals['_MESSAGEEXPIREROOM']._serialized_start=1160
+-  _globals['_MESSAGEEXPIREROOM']._serialized_end=1221
+-  _globals['_ROOMROUND']._serialized_start=1224
+-  _globals['_ROOMROUND']._serialized_end=1508
+-  _globals['_ROOMPARTICIPANT']._serialized_start=1510
+-  _globals['_ROOMPARTICIPANT']._serialized_end=1604
+-  _globals['_MESSAGEBUYCOINS']._serialized_start=1606
+-  _globals['_MESSAGEBUYCOINS']._serialized_end=1689
+-  _globals['_MESSAGEBUYGEMS']._serialized_start=1691
+-  _globals['_MESSAGEBUYGEMS']._serialized_end=1773
+-  _globals['_MESSAGETRANSFERGEMS']._serialized_start=1775
+-  _globals['_MESSAGETRANSFERGEMS']._serialized_end=1854
+-  _globals['_MESSAGEMINTCOSMETIC']._serialized_start=1856
+-  _globals['_MESSAGEMINTCOSMETIC']._serialized_end=1958
+-  _globals['_MESSAGEBUYCOSMETIC']._serialized_start=1960
+-  _globals['_MESSAGEBUYCOSMETIC']._serialized_end=2036
+-  _globals['_MESSAGETRANSFERCOSMETIC']._serialized_start=2038
+-  _globals['_MESSAGETRANSFERCOSMETIC']._serialized_end=2123
+-  _globals['_GEMBALANCE']._serialized_start=2125
+-  _globals['_GEMBALANCE']._serialized_end=2170
+-  _globals['_COSMETIC']._serialized_start=2172
+-  _globals['_COSMETIC']._serialized_end=2237
+-  _globals['_MESSAGEOPENROULETTE']._serialized_start=2239
+-  _globals['_MESSAGEOPENROULETTE']._serialized_end=2342
+-  _globals['_MESSAGEROULETTEBET']._serialized_start=2344
+-  _globals['_MESSAGEROULETTEBET']._serialized_end=2460
+-  _globals['_MESSAGESETTLEROULETTE']._serialized_start=2462
+-  _globals['_MESSAGESETTLEROULETTE']._serialized_end=2543
+-  _globals['_MESSAGEEXPIREROULETTE']._serialized_start=2545
+-  _globals['_MESSAGEEXPIREROULETTE']._serialized_end=2610
+-  _globals['_ROULETTEROUND']._serialized_start=2613
+-  _globals['_ROULETTEROUND']._serialized_end=2822
+-  _globals['_ROULETTEBETRECORD']._serialized_start=2824
+-  _globals['_ROULETTEBETRECORD']._serialized_end=2939
+-  _globals['_MESSAGEOPENDOMINO']._serialized_start=2941
+-  _globals['_MESSAGEOPENDOMINO']._serialized_end=3061
+-  _globals['_MESSAGEJOINDOMINO']._serialized_start=3063
+-  _globals['_MESSAGEJOINDOMINO']._serialized_end=3140
+-  _globals['_DOMINOMOVERECORD']._serialized_start=3142
+-  _globals['_DOMINOMOVERECORD']._serialized_end=3226
+-  _globals['_MESSAGESETTLEDOMINO']._serialized_start=3228
+-  _globals['_MESSAGESETTLEDOMINO']._serialized_end=3347
+-  _globals['_MESSAGEEXPIREDOMINO']._serialized_start=3349
+-  _globals['_MESSAGEEXPIREDOMINO']._serialized_end=3412
+-  _globals['_DOMINOROUND']._serialized_start=3415
+-  _globals['_DOMINOROUND']._serialized_end=3680
+-  _globals['_MESSAGEOPENPOKER']._serialized_start=3683
+-  _globals['_MESSAGEOPENPOKER']._serialized_end=3839
+-  _globals['_MESSAGEJOINPOKER']._serialized_start=3841
+-  _globals['_MESSAGEJOINPOKER']._serialized_end=3917
+-  _globals['_POKERACTIONRECORD']._serialized_start=3919
+-  _globals['_POKERACTIONRECORD']._serialized_end=3970
+-  _globals['_MESSAGESETTLEPOKER']._serialized_start=3972
+-  _globals['_MESSAGESETTLEPOKER']._serialized_end=4093
+-  _globals['_MESSAGEEXPIREPOKER']._serialized_start=4095
+-  _globals['_MESSAGEEXPIREPOKER']._serialized_end=4157
+-  _globals['_POKERROUND']._serialized_start=4160
+-  _globals['_POKERROUND']._serialized_end=4461
++  _globals['_MESSAGEOPENROOM']._serialized_end=943
++  _globals['_MESSAGECLOSEROOM']._serialized_start=945
++  _globals['_MESSAGECLOSEROOM']._serialized_end=1007
++  _globals['_MESSAGEJOINROOM']._serialized_start=1009
++  _globals['_MESSAGEJOINROOM']._serialized_end=1103
++  _globals['_MESSAGESETTLEROOM']._serialized_start=1106
++  _globals['_MESSAGESETTLEROOM']._serialized_end=1245
++  _globals['_MESSAGEEXPIREROOM']._serialized_start=1247
++  _globals['_MESSAGEEXPIREROOM']._serialized_end=1308
++  _globals['_ROOMROUND']._serialized_start=1311
++  _globals['_ROOMROUND']._serialized_end=1684
++  _globals['_ROOMPARTICIPANT']._serialized_start=1686
++  _globals['_ROOMPARTICIPANT']._serialized_end=1780
++  _globals['_MESSAGEBUYCOINS']._serialized_start=1782
++  _globals['_MESSAGEBUYCOINS']._serialized_end=1865
++  _globals['_MESSAGEBUYGEMS']._serialized_start=1867
++  _globals['_MESSAGEBUYGEMS']._serialized_end=1949
++  _globals['_MESSAGETRANSFERGEMS']._serialized_start=1951
++  _globals['_MESSAGETRANSFERGEMS']._serialized_end=2030
++  _globals['_MESSAGEMINTCOSMETIC']._serialized_start=2032
++  _globals['_MESSAGEMINTCOSMETIC']._serialized_end=2134
++  _globals['_MESSAGEBUYCOSMETIC']._serialized_start=2136
++  _globals['_MESSAGEBUYCOSMETIC']._serialized_end=2212
++  _globals['_MESSAGETRANSFERCOSMETIC']._serialized_start=2214
++  _globals['_MESSAGETRANSFERCOSMETIC']._serialized_end=2299
++  _globals['_GEMBALANCE']._serialized_start=2301
++  _globals['_GEMBALANCE']._serialized_end=2346
++  _globals['_COSMETIC']._serialized_start=2348
++  _globals['_COSMETIC']._serialized_end=2413
++  _globals['_MESSAGEOPENROULETTE']._serialized_start=2415
++  _globals['_MESSAGEOPENROULETTE']._serialized_end=2541
++  _globals['_MESSAGECLOSEROULETTE']._serialized_start=2543
++  _globals['_MESSAGECLOSEROULETTE']._serialized_end=2609
++  _globals['_MESSAGEROULETTEBET']._serialized_start=2611
++  _globals['_MESSAGEROULETTEBET']._serialized_end=2727
++  _globals['_MESSAGESETTLEROULETTE']._serialized_start=2729
++  _globals['_MESSAGESETTLEROULETTE']._serialized_end=2810
++  _globals['_MESSAGEEXPIREROULETTE']._serialized_start=2812
++  _globals['_MESSAGEEXPIREROULETTE']._serialized_end=2877
++  _globals['_ROULETTEROUND']._serialized_start=2880
++  _globals['_ROULETTEROUND']._serialized_end=3178
++  _globals['_ROULETTEBETRECORD']._serialized_start=3180
++  _globals['_ROULETTEBETRECORD']._serialized_end=3295
++  _globals['_MESSAGEOPENDOMINO']._serialized_start=3298
++  _globals['_MESSAGEOPENDOMINO']._serialized_end=3441
++  _globals['_MESSAGECLOSEDOMINO']._serialized_start=3443
++  _globals['_MESSAGECLOSEDOMINO']._serialized_end=3507
++  _globals['_MESSAGEJOINDOMINO']._serialized_start=3509
++  _globals['_MESSAGEJOINDOMINO']._serialized_end=3586
++  _globals['_DOMINOMOVERECORD']._serialized_start=3588
++  _globals['_DOMINOMOVERECORD']._serialized_end=3672
++  _globals['_MESSAGESETTLEDOMINO']._serialized_start=3674
++  _globals['_MESSAGESETTLEDOMINO']._serialized_end=3793
++  _globals['_MESSAGEEXPIREDOMINO']._serialized_start=3795
++  _globals['_MESSAGEEXPIREDOMINO']._serialized_end=3858
++  _globals['_DOMINOROUND']._serialized_start=3861
++  _globals['_DOMINOROUND']._serialized_end=4215
++  _globals['_MESSAGEOPENPOKER']._serialized_start=4218
++  _globals['_MESSAGEOPENPOKER']._serialized_end=4397
++  _globals['_MESSAGECLOSEPOKER']._serialized_start=4399
++  _globals['_MESSAGECLOSEPOKER']._serialized_end=4462
++  _globals['_MESSAGEJOINPOKER']._serialized_start=4464
++  _globals['_MESSAGEJOINPOKER']._serialized_end=4540
++  _globals['_POKERACTIONRECORD']._serialized_start=4542
++  _globals['_POKERACTIONRECORD']._serialized_end=4593
++  _globals['_MESSAGESETTLEPOKER']._serialized_start=4595
++  _globals['_MESSAGESETTLEPOKER']._serialized_end=4716
++  _globals['_MESSAGEEXPIREPOKER']._serialized_start=4718
++  _globals['_MESSAGEEXPIREPOKER']._serialized_end=4780
++  _globals['_POKERROUND']._serialized_start=4783
++  _globals['_POKERROUND']._serialized_end=5173
+ # @@protoc_insertion_point(module_scope)
 diff --git a/ops/prometheus-rules.yaml b/ops/prometheus-rules.yaml
 new file mode 100644
 index 0000000..5e8a794
@@ -3200,15 +4224,35 @@ index 0000000..6d2eab3
 +printf 'RUNTIME_VERIFIED container=%s image=%s revision=%s\n' \
 +    "$container" "$image_id" "$image_revision"
 diff --git a/tests/fakes.py b/tests/fakes.py
-index 167e85e..092efc3 100644
+index 167e85e..628abeb 100644
 --- a/tests/fakes.py
 +++ b/tests/fakes.py
-@@ -22,57 +22,57 @@ class FakeBridge:
+@@ -1,6 +1,8 @@
+ """Shared test doubles for gameserver unit tests -- no live chain, no
+ network calls, no real BLS signing."""
+ 
++import hashlib
++
+ from gameserver.chain import Key
+ 
+ 
+@@ -14,6 +16,8 @@ class FakeBridge:
+         self.network_id = 1
+         self.query_url = "http://fake"
+         self._key_counter = 0
++        self.calls = []
++        self.wait_targets = []
+ 
+     def new_key(self, nickname=""):
+         self._key_counter += 1
+@@ -22,59 +26,87 @@ class FakeBridge:
          # callers like cards_for() do bytes.fromhex(addr).
          return Key(address=f"{n:040x}", public_key=f"{n:096x}", private_key=f"{n:064x}")
  
 -    def open_room(self, operator, round_id, commitment, entry_fee, rake_bps, payout_weights_bps):
-+    def open_room(self, operator, round_id, commitment, entry_fee, rake_bps, payout_weights_bps, operation_id=None):
++    def open_room(self, operator, round_id, commitment, entry_fee, rake_bps, payout_weights_bps,
++                  operator_bond=1_000_000, operation_id=None):
++        self.calls.append(("open_room", self._height, operator_bond))
          return "0xopen"
  
 -    def buy_coins(self, admin, recipient, amount):
@@ -3226,10 +4270,17 @@ index 167e85e..092efc3 100644
  
 -    def settle_room(self, operator, round_id, seed, pattern="line"):
 +    def settle_room(self, operator, round_id, seed, pattern="line", operation_id=None):
++        self.calls.append(("settle_room", self._height, seed))
          return "0xsettle"
  
 -    def open_roulette(self, operator, round_id, commitment, rake_bps):
-+    def open_roulette(self, operator, round_id, commitment, rake_bps, operation_id=None):
++    def close_room(self, operator, round_id, operation_id=None):
++        self.calls.append(("close_room", self._height))
++        return "0xcloseroom", self._height
++
++    def open_roulette(self, operator, round_id, commitment, rake_bps, operator_bond=1_000_000,
++                      operation_id=None):
++        self.calls.append(("open_roulette", self._height, operator_bond))
          return "0xopenroulette"
  
 -    def roulette_bet(self, player, round_id, bet_type, bet_number, amount):
@@ -3239,13 +4290,20 @@ index 167e85e..092efc3 100644
  
 -    def settle_roulette(self, operator, round_id, seed):
 +    def settle_roulette(self, operator, round_id, seed, operation_id=None):
++        self.calls.append(("settle_roulette", self._height, seed))
          return "0xsettleroulette"
  
++    def close_roulette(self, operator, round_id, operation_id=None):
++        self.calls.append(("close_roulette", self._height))
++        return "0xcloseroulette", self._height
++
      def expire_roulette(self, caller, round_id):
          return "0xexpireroulette"
  
 -    def open_domino(self, operator, round_id, commitment, entry_fee, rake_bps):
-+    def open_domino(self, operator, round_id, commitment, entry_fee, rake_bps, operation_id=None):
++    def open_domino(self, operator, round_id, commitment, entry_fee, rake_bps,
++                    operator_bond=1_000_000, operation_id=None):
++        self.calls.append(("open_domino", self._height, operator_bond))
          return "0xopendomino"
  
 -    def join_domino(self, player, round_id, amount):
@@ -3255,13 +4313,20 @@ index 167e85e..092efc3 100644
  
 -    def settle_domino(self, operator, round_id, seed, moves):
 +    def settle_domino(self, operator, round_id, seed, moves, operation_id=None):
++        self.calls.append(("settle_domino", self._height, seed))
          return "0xsettledomino"
  
++    def close_domino(self, operator, round_id, operation_id=None):
++        self.calls.append(("close_domino", self._height))
++        return "0xclosedomino", self._height
++
      def expire_domino(self, caller, round_id):
          return "0xexpiredomino"
  
 -    def open_poker(self, operator, round_id, commitment, small_blind, big_blind, buy_in, rake_bps):
-+    def open_poker(self, operator, round_id, commitment, small_blind, big_blind, buy_in, rake_bps, operation_id=None):
++    def open_poker(self, operator, round_id, commitment, small_blind, big_blind, buy_in, rake_bps,
++                   operator_bond=1_000_000, operation_id=None):
++        self.calls.append(("open_poker", self._height, operator_bond))
          return "0xopenpoker"
  
 -    def join_poker(self, player, round_id, amount):
@@ -3271,9 +4336,30 @@ index 167e85e..092efc3 100644
  
 -    def settle_poker(self, operator, round_id, seed, actions):
 +    def settle_poker(self, operator, round_id, seed, actions, operation_id=None):
++        self.calls.append(("settle_poker", self._height, seed))
          return "0xsettlepoker"
  
++    def close_poker(self, operator, round_id, operation_id=None):
++        self.calls.append(("close_poker", self._height))
++        return "0xclosepoker", self._height
++
      def expire_poker(self, caller, round_id):
+         return "0xexpirepoker"
+ 
+@@ -85,5 +117,13 @@ class FakeBridge:
+         self._height += 1
+         return self._height
+ 
++    def wait_for_height(self, target_height, timeout=150.0, poll=1.0):
++        self.wait_targets.append(target_height)
++        self._height = max(self._height, target_height)
++        return self._height
++
++    def block_hash(self, height):
++        return hashlib.sha256(b"fake-block" + int(height).to_bytes(8, "big")).digest()
++
+     def gems(self, address):
+         return 0
 diff --git a/tests/test_audit_security.py b/tests/test_audit_security.py
 new file mode 100644
 index 0000000..408804e
@@ -3716,8 +4802,192 @@ index 0000000..0bd3301
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/tests/test_fair_randomness_v2.py b/tests/test_fair_randomness_v2.py
+new file mode 100644
+index 0000000..b6ca36c
+--- /dev/null
++++ b/tests/test_fair_randomness_v2.py
+@@ -0,0 +1,178 @@
++"""A.6.7 regression tests for the game-server close/entropy lifecycle."""
++
++import hashlib
++import os
++import tempfile
++import unittest
++
++from engine import roulette as eroulette
++from gameserver.chain import Key
++from gameserver.db import Store
++from gameserver.domino_rooms import DominoManager
++from gameserver.fairness import (
++    ENTROPY_DELAY_BLOCKS,
++    ENTROPY_WINDOW_BLOCKS,
++    RNG_V2_ENTROPY_DOMAIN,
++    RNG_V2_SEED_DOMAIN,
++    derive_final_seed,
++)
++from gameserver.poker_rooms import PokerManager
++from gameserver.rooms import RoomManager
++from gameserver.roulette_rooms import RouletteManager
++
++from .fakes import FakeBridge
++
++
++def _plugin_reference_seed(block_hashes, operator_secret, round_id):
++    """A second, independent implementation of the plugin's replay-seed layout
++    (contract/contract.py: fold_consensus_entropy + rng_v2_seed + derive_seed).
++    If derive_final_seed ever drifts from this, the game-server predicts a
++    different winner than the plugin pays -- the exact A.6.6 E2E flake."""
++    fold = hashlib.sha256()
++    fold.update(RNG_V2_ENTROPY_DOMAIN)
++    for h in block_hashes:
++        fold.update(h)
++    entropy = fold.digest()
++
++    seed = hashlib.sha256()
++    for part in (RNG_V2_SEED_DOMAIN, operator_secret, entropy, round_id):
++        seed.update(len(part).to_bytes(4, "big"))  # derive_seed length-prefixes
++        seed.update(part)
++    return seed.digest()
++
++
++class FairLifecycleTest(unittest.TestCase):
++    def setUp(self):
++        fd, self.path = tempfile.mkstemp(suffix=".db")
++        os.close(fd)
++        os.remove(self.path)
++        self.store = Store(self.path)
++        self.bridge = FakeBridge()
++        self.operator = self.bridge.new_key("operator")
++
++    def tearDown(self):
++        self.store.close()
++        for suffix in ("", "-wal", "-shm"):
++            path = self.path + suffix
++            if os.path.exists(path):
++                os.remove(path)
++
++    def assert_close_before_settle(self, game):
++        names = [call[0] for call in self.bridge.calls]
++        close_index = names.index(f"close_{game}")
++        settle_index = names.index(f"settle_{game}")
++        self.assertLess(close_index, settle_index)
++        settle_height = self.bridge.calls[settle_index][1]
++        self.assertGreaterEqual(settle_height, self.bridge.wait_targets[-1])
++
++    def test_bingo_closes_waits_and_settles_with_v2_seed(self):
++        manager = RoomManager(self.bridge, self.operator, self.store, operator_bond=77)
++        rnd = manager.create_round(entry_fee=100, room="classic")
++        address = manager.add_player(rnd.id_hex)
++        result = manager.settle(rnd.id_hex)
++
++        self.assertIn(address, result)
++        self.assertEqual(rnd.status, "settled")
++        self.assertNotEqual(rnd.seed, rnd.outcome_seed)
++        self.assertEqual(len(rnd.order), 75)
++        self.assert_close_before_settle("room")
++
++    def test_roulette_uses_exact_window_and_v2_spin(self):
++        manager = RouletteManager(self.bridge, self.operator, self.store, operator_bond=88)
++        rnd = manager.open_round(rake_bps=1000)
++        manager.place_bet(rnd.id_hex, "red", 0, 100)
++        result = manager.settle(rnd.id_hex)
++
++        expected_start = rnd.close_height + ENTROPY_DELAY_BLOCKS
++        expected_end = expected_start + ENTROPY_WINDOW_BLOCKS - 1
++        expected_seed = derive_final_seed(
++            self.bridge, rnd.seed, rnd.round_id, expected_start, expected_end,
++        )
++        self.assertEqual((rnd.entropy_start, rnd.entropy_end), (expected_start, expected_end))
++        self.assertEqual(self.bridge.wait_targets[-1], expected_end + 1)
++        self.assertEqual(rnd.outcome_seed, expected_seed)
++        self.assertEqual(result["spin"], eroulette.spin_number(expected_seed))
++        self.assert_close_before_settle("roulette")
++
++    def test_domino_and_poker_close_when_last_seat_arrives(self):
++        domino = DominoManager(self.bridge, self.operator, self.store, operator_bond=99)
++        dr = domino.open_round(100, 1000)
++        domino.join(dr.id_hex)
++        self.assertEqual(dr.status, "open")
++        domino.join(dr.id_hex)
++        self.assertEqual(dr.status, "closed")
++        self.assertTrue(dr.outcome_seed)
++        self.assertIn(dr.id_hex, domino.engines)
++
++        poker = PokerManager(self.bridge, self.operator, self.store, operator_bond=111)
++        pr = poker.open_round(10, 20, 1000, 1000)
++        poker.join(pr.id_hex)
++        self.assertEqual(pr.status, "open")
++        poker.join(pr.id_hex)
++        self.assertEqual(pr.status, "closed")
++        self.assertTrue(pr.outcome_seed)
++        self.assertIn(pr.id_hex, poker.engines)
++
++        names = [call[0] for call in self.bridge.calls]
++        self.assertIn("close_domino", names)
++        self.assertIn("close_poker", names)
++
++    def test_closed_round_reloads_without_losing_entropy_boundary(self):
++        manager = RouletteManager(self.bridge, self.operator, self.store)
++        rnd = manager.open_round(1000)
++        manager.place_bet(rnd.id_hex, "black", 0, 100)
++        manager.close_betting(rnd.id_hex)
++
++        reloaded = RouletteManager(self.bridge, self.operator, self.store).rounds[rnd.id_hex]
++        self.assertEqual(reloaded.status, "closed")
++        self.assertEqual(reloaded.close_height, rnd.close_height)
++        self.assertEqual(reloaded.entropy_end, rnd.entropy_end)
++        self.assertEqual(reloaded.close_tx_hash, rnd.close_tx_hash)
++
++    def test_derive_final_seed_matches_the_plugin_replay_layout(self):
++        bridge = FakeBridge()
++        operator_secret = bytes(range(32))
++        round_id = bytes.fromhex("0011223344556677")
++        start, end = 120, 127
++        window = [bridge.block_hash(h) for h in range(start, end + 1)]
++
++        got = derive_final_seed(bridge, operator_secret, round_id, start, end)
++        self.assertEqual(got, _plugin_reference_seed(window, operator_secret, round_id))
++        # a raw (non-length-prefixed) concatenation -- the old bug -- must differ
++        raw = hashlib.sha256(
++            RNG_V2_SEED_DOMAIN + operator_secret
++            + hashlib.sha256(RNG_V2_ENTROPY_DOMAIN + b"".join(window)).digest()
++            + round_id
++        ).digest()
++        self.assertNotEqual(got, raw)
++
++    def test_derive_final_seed_frozen_known_answer(self):
++        """Pins the exact bytes (FakeBridge block hashes, all-zero secret,
++        round_id cafebabecafebabe, window 100..107) so the game-server and the
++        plugin cannot silently drift together. If the protocol changes on
++        purpose, update this vector and the plugin's replay layout in lockstep."""
++        bridge = FakeBridge()
++        seed = derive_final_seed(
++            bridge, b"\x00" * 32, bytes.fromhex("cafebabecafebabe"), 100, 107,
++        )
++        self.assertEqual(
++            seed.hex(),
++            "12f4931d3de1074b0293a7f94c915fa193edfc11a907e4b9f129f9f51ba313a9",
++        )
++
++    def test_generated_proto_contains_all_close_messages_and_bonds(self):
++        from gameserver import tx_pb2
++
++        fixtures = (
++            (tx_pb2.MessageOpenRoom, tx_pb2.MessageCloseRoom),
++            (tx_pb2.MessageOpenRoulette, tx_pb2.MessageCloseRoulette),
++            (tx_pb2.MessageOpenDomino, tx_pb2.MessageCloseDomino),
++            (tx_pb2.MessageOpenPoker, tx_pb2.MessageClosePoker),
++        )
++        for open_type, close_type in fixtures:
++            self.assertIn("operator_bond", open_type.DESCRIPTOR.fields_by_name)
++            self.assertEqual(close_type.DESCRIPTOR.fields_by_name["round_id"].number, 2)
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tests/test_gameserver_app.py b/tests/test_gameserver_app.py
-index 39eef5c..7baec90 100644
+index 39eef5c..0d7c7f5 100644
 --- a/tests/test_gameserver_app.py
 +++ b/tests/test_gameserver_app.py
 @@ -22,14 +22,17 @@ from .fakes import FakeBridge
@@ -3772,7 +5042,24 @@ index 39eef5c..7baec90 100644
  
      def test_client_supplied_economics_are_ignored(self):
          resp = self.client.post("/rounds", json={
-@@ -109,8 +112,8 @@ class TestJoinAndRegister(AppTestCase):
+@@ -95,7 +98,7 @@ class TestHealthAndRooms(AppTestCase):
+ 
+ 
+ class TestJoinAndRegister(AppTestCase):
+-    def test_join_returns_cards_for_the_requested_count(self):
++    def test_join_withholds_cards_until_post_close_entropy(self):
+         create = self.client.post("/rounds", json={"room": "classic"},
+                                   headers={"Authorization": "Bearer test-admin-token"})
+         rid = create.json()["roundId"]
+@@ -103,14 +106,15 @@ class TestJoinAndRegister(AppTestCase):
+         body = resp.json()
+         self.assertEqual(resp.status_code, 200)
+         self.assertEqual(body["numCards"], 2)
+-        self.assertEqual(len(body["cards"]), 2)
++        self.assertIsNone(body["cards"])
++        self.assertTrue(body["cardsPending"])
+ 
+     def test_register_lowercases_the_address(self):
          create = self.client.post("/rounds", json={"room": "classic"},
                                    headers={"Authorization": "Bearer test-admin-token"})
          rid = create.json()["roundId"]
@@ -3864,7 +5151,7 @@ index 9296af6..a5ba254 100644
  
  class TestActionValidation(AppTestCase):
 diff --git a/tests/test_gameserver_roulette_app.py b/tests/test_gameserver_roulette_app.py
-index d0d9b9e..9140c31 100644
+index d0d9b9e..5be8e03 100644
 --- a/tests/test_gameserver_roulette_app.py
 +++ b/tests/test_gameserver_roulette_app.py
 @@ -18,14 +18,17 @@ from .fakes import FakeBridge
@@ -3897,6 +5184,15 @@ index d0d9b9e..9140c31 100644
  
      def test_register_also_validates_the_bet(self):
          rid = self.client.post("/roulette/rounds").json()["roundId"]
+@@ -150,6 +153,8 @@ class TestRouletteWebSocket(AppTestCase):
+         # avoids a real 15s sleep in the test.
+         self.app.state.roulette_manager.rounds[rid].opened_at -= 9999
+         with self.client.websocket_connect(f"/ws/roulette/{rid}") as ws:
++            msg = ws.receive_json()
++            self.assertEqual(msg["type"], "closed")
+             msg = ws.receive_json()
+             self.assertEqual(msg["type"], "spinning")
+             msg = ws.receive_json()
 diff --git a/tests/test_operational_controls.py b/tests/test_operational_controls.py
 new file mode 100644
 index 0000000..2da89e7
