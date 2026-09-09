@@ -6,7 +6,7 @@ Safety rule: production remains paused; all chain tests use valueless tokens and
 ## Baseline
 
 - Frontend audit: `2eb59a3`; evidence/report: `8f7b4e2`.
-- Game-server candidate: `audit/production-hardening` at `4029168`, based on production `e842785`.
+- Game-server candidate: `audit/production-hardening` at `6287469`, based on production `e842785`.
 - Canopy plugin candidate: `audit/canasino-financial-hardening` at `ee3b4e6e`, based on production `cd4cd495`.
 - FleetWallet candidate: `audit/canasino-message-auth` at `86102d3`, based on `86fb179`.
 - Baseline gates: frontend 6 unit + 9 E2E; game-server 203; plugin 177; all passing.
@@ -48,3 +48,4 @@ Safety rule: production remains paused; all chain tests use valueless tokens and
 - 2026-09-08: frontend passed ESLint, TypeScript, 11/11 unit tests and production build. All changes remain local candidates; production is still paused and unchanged.
 - 2026-09-08: fault injection now covers the business-level `fund -> join/bet` boundary. A durable custodial-join saga stores the generated key and exact payload before funding, resumes the same outbox operations after a lost accepted response, and applies local membership once. Bingo, Roulette, Domino and Poker each proved one fund and one join after restart; full game-server suite passed 233/233 with no network.
 - 2026-09-08: inspected the Canopy consensus/plugin boundary for fair randomness. Canopy commits block hashes and VDF data, but `PluginBeginRequest` currently exposes only `height`; the plugin cannot authenticate a historical hash supplied by the operator. Workstream 3 therefore remains blocking pending an upstream-compatible FSM-to-plugin entropy field plus close-height/bond lifecycle tests.
+- 2026-09-08: operational controls now expose fairness and pending-saga gauges, ship six validated Prometheus safety rules, and include a fail-closed runtime verifier for expected OCI revision/image ID plus health. `promtool` accepted all six rules; shell syntax passed; the isolated game-server suite remained 233/233. Alert delivery integration, SBOM/signing and an off-box restore rehearsal remain for workstream 7/8.

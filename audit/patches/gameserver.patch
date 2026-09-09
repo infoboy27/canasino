@@ -138,7 +138,7 @@ index 8512934..fcaa11e 100644
              raise ValueError("cannot debit a negative amount")
          if not self.can_afford(currency, amount):
 diff --git a/gameserver/app.py b/gameserver/app.py
-index 5e5d490..80506d1 100644
+index 5e5d490..8087703 100644
 --- a/gameserver/app.py
 +++ b/gameserver/app.py
 @@ -34,7 +34,7 @@ Endpoints:
@@ -438,7 +438,7 @@ index 5e5d490..80506d1 100644
      async def broadcast_domino(rid: str, message: dict) -> None:
          dead = []
          for ws in domino_conns.get(rid, []):
-@@ -300,14 +387,201 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -300,14 +387,203 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
              poker_conns[rid].remove(ws)
  
      def require_admin(authorization: str | None = Header(default=None)) -> None:
@@ -631,18 +631,20 @@ index 5e5d490..80506d1 100644
 +        values = {
 +            "canasino_chain_writes_enabled": int(chain_writes_enabled),
 +            "canasino_real_money_enabled": int(real_money and chain_writes_enabled and fair_randomness_v2),
++            "canasino_fair_randomness_v2": int(fair_randomness_v2),
 +            "canasino_open_bingo_rounds": manager.open_round_count(),
 +            "canasino_open_roulette_rounds": roulette_manager.open_round_count(),
 +            "canasino_open_domino_rounds": domino_manager.open_round_count(),
 +            "canasino_open_poker_rounds": poker_manager.open_round_count(),
 +            "canasino_reconcilable_wallet_operations": len(store.reconcilable_operations()),
 +            "canasino_pending_chain_submissions": len(store.pending_chain_submissions()),
++            "canasino_pending_custodial_joins": len(store.pending_custodial_joins()),
 +        }
 +        return "\n".join(f"# TYPE {name} gauge\n{name} {value}" for name, value in values.items()) + "\n"
  
      @app.get("/rooms")
      def rooms():
-@@ -343,7 +617,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -343,7 +619,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          ]
  
      @app.get("/players/{address}/wallet")
@@ -651,7 +653,7 @@ index 5e5d490..80506d1 100644
          """Available (on-chain account balance) + locked (escrowed in open
          rounds) + settled-round history, in one call for the Wallet screen."""
          addr = address.lower()
-@@ -356,11 +630,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -356,11 +632,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          }
  
      @app.get("/players/{address}/gems")
@@ -665,7 +667,7 @@ index 5e5d490..80506d1 100644
          """Admin-only: there is no payment processor yet, so gems are normally
          minted by the operator once a real IAP clears. Requires the admin
          token — never reachable from client code without it."""
-@@ -407,11 +681,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -407,11 +683,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      # --- wallet-signed join support (FleetWallet bingo_join) ------------------
  
      @app.post("/rounds/{rid}/register")
@@ -689,7 +691,7 @@ index 5e5d490..80506d1 100644
  
      @app.get("/rounds/{rid}/info")
      def round_info(rid: str):
-@@ -436,17 +719,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -436,17 +721,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/rounds/{rid}/card")
@@ -712,7 +714,7 @@ index 5e5d490..80506d1 100644
          return store.history_for(address.lower(), limit)
  
      @app.get("/players/{address}/stats")
-@@ -454,7 +740,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -454,7 +742,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return store.stats_for(address.lower())
  
      @app.get("/leaderboard")
@@ -721,7 +723,7 @@ index 5e5d490..80506d1 100644
          if period not in ("daily", "weekly", "monthly", "alltime"):
              period = "alltime"
          return store.leaderboard(period, limit)
-@@ -488,13 +774,21 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -488,13 +776,21 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      # --- wallet-signed bet support (mirrors Bingo's bingo_join path) -----------
  
      @app.post("/roulette/rounds/{rid}/register")
@@ -748,7 +750,7 @@ index 5e5d490..80506d1 100644
  
      @app.get("/roulette/rounds/{rid}/info")
      def roulette_round_info(rid: str):
-@@ -519,7 +813,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -519,7 +815,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/roulette/history")
@@ -757,7 +759,7 @@ index 5e5d490..80506d1 100644
          return store.roulette_history_for(address.lower(), limit)
  
      @app.websocket("/ws/roulette/{rid}")
-@@ -567,13 +861,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -567,13 +863,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return {"player": addr, "seat": domino_manager.rounds[rid].player_order.index(addr)}
  
      @app.post("/domino/rounds/{rid}/register")
@@ -783,7 +785,7 @@ index 5e5d490..80506d1 100644
  
      @app.get("/domino/rounds/{rid}")
      def get_domino_round(rid: str):
-@@ -589,6 +889,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -589,6 +891,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "handSizes": [len(h) for h in engine.hands],
                  "finished": engine.finished,
              })
@@ -791,7 +793,7 @@ index 5e5d490..80506d1 100644
          return body
  
      @app.get("/domino/rounds/{rid}/info")
-@@ -600,10 +901,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -600,10 +903,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": domino_manager.bridge.query_url}
  
      @app.get("/domino/rounds/{rid}/hand")
@@ -804,7 +806,7 @@ index 5e5d490..80506d1 100644
          hand = domino_manager.hand_for(rid, address.lower())
          return {"address": address.lower(), "hand": [list(t) for t in hand]}
  
-@@ -620,20 +919,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -620,20 +921,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/domino/history")
@@ -834,7 +836,7 @@ index 5e5d490..80506d1 100644
          except edomino.IllegalMove as exc:
              raise HTTPException(status_code=422, detail=f"illegal move: {exc}")
          except ValueError as exc:
-@@ -709,13 +1014,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -709,13 +1016,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return {"player": addr, "seat": poker_manager.rounds[rid].player_order.index(addr)}
  
      @app.post("/poker/rounds/{rid}/register")
@@ -860,7 +862,7 @@ index 5e5d490..80506d1 100644
  
      @app.get("/poker/rounds/{rid}")
      def get_poker_round(rid: str):
-@@ -736,6 +1047,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -736,6 +1049,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "allIn": engine.all_in,
                  "finished": engine.finished,
              })
@@ -868,7 +870,7 @@ index 5e5d490..80506d1 100644
          return body
  
      @app.get("/poker/rounds/{rid}/info")
-@@ -748,9 +1060,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -748,9 +1062,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": poker_manager.bridge.query_url}
  
      @app.get("/poker/rounds/{rid}/hand")
@@ -880,7 +882,7 @@ index 5e5d490..80506d1 100644
          hole = poker_manager.hole_cards_for(rid, address.lower())
          return {"address": address.lower(), "hole": [list(c) for c in hole]}
  
-@@ -758,7 +1069,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -758,7 +1071,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      def poker_proof(rid: str):
          rnd = poker_manager.rounds[rid]
          settled = rnd.status == "settled"
@@ -889,7 +891,7 @@ index 5e5d490..80506d1 100644
          return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
                  "seed": rnd.seed.hex() if settled else None,
                  "actions": rnd.actions if settled else None,
-@@ -770,20 +1081,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -770,20 +1083,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/poker/history")
@@ -3004,6 +3006,62 @@ index 0000000..e1b30cc
 +            self._settled_results[round_id_hex] = deepcopy(result)
 +            return result
 +    return call
+diff --git a/ops/prometheus-rules.yaml b/ops/prometheus-rules.yaml
+new file mode 100644
+index 0000000..5e8a794
+--- /dev/null
++++ b/ops/prometheus-rules.yaml
+@@ -0,0 +1,50 @@
++groups:
++  - name: canasino-financial-safety
++    rules:
++      - alert: CanasinoGameServerDown
++        expr: up{job="canasino-gameserver"} == 0
++        for: 2m
++        labels:
++          severity: critical
++        annotations:
++          summary: Canasino game server is unavailable
++
++      - alert: CanasinoUnsafeWriteConfiguration
++        expr: canasino_chain_writes_enabled == 1 and canasino_real_money_enabled == 0
++        for: 1m
++        labels:
++          severity: critical
++        annotations:
++          summary: Chain writes are enabled while the complete real-money gate is false
++
++      - alert: CanasinoPendingChainSubmission
++        expr: canasino_pending_chain_submissions > 0
++        for: 5m
++        labels:
++          severity: critical
++        annotations:
++          summary: A chain submission has not reached verified finality
++
++      - alert: CanasinoPendingWalletReconciliation
++        expr: canasino_reconcilable_wallet_operations > 0
++        for: 5m
++        labels:
++          severity: critical
++        annotations:
++          summary: A wallet-authorized operation needs reconciliation
++
++      - alert: CanasinoPendingCustodialJoin
++        expr: canasino_pending_custodial_joins > 0
++        for: 5m
++        labels:
++          severity: warning
++        annotations:
++          summary: A legacy custodial fund-and-join saga needs reconciliation
++
++      - alert: CanasinoRealMoneyModeActive
++        expr: canasino_real_money_enabled == 1
++        for: 1m
++        labels:
++          severity: info
++        annotations:
++          summary: Real-money mode is active and must have an approved change record
 diff --git a/requirements.txt b/requirements.txt
 new file mode 100644
 index 0000000..4fbd9e5
@@ -3100,6 +3158,47 @@ index 0000000..b7c4f28
 +finally:
 +    os.unlink(path)
 +'
+diff --git a/scripts_verify_runtime.sh b/scripts_verify_runtime.sh
+new file mode 100644
+index 0000000..6d2eab3
+--- /dev/null
++++ b/scripts_verify_runtime.sh
+@@ -0,0 +1,35 @@
++#!/bin/sh
++set -eu
++
++container="${1:-canasino-gameserver}"
++expected_revision="${EXPECTED_REVISION:?set EXPECTED_REVISION to the approved full Git commit}"
++expected_image_id="${EXPECTED_IMAGE_ID:-}"
++
++running="$(docker inspect --format '{{.State.Running}}' "$container")"
++[ "$running" = "true" ] || {
++    echo "runtime verification failed: container is not running" >&2
++    exit 1
++}
++
++image_id="$(docker inspect --format '{{.Image}}' "$container")"
++image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id")"
++
++[ "$image_revision" = "$expected_revision" ] || {
++    echo "runtime verification failed: OCI revision does not match approved commit" >&2
++    exit 1
++}
++
++if [ -n "$expected_image_id" ] && [ "$image_id" != "$expected_image_id" ]; then
++    echo "runtime verification failed: image digest does not match approved artifact" >&2
++    exit 1
++fi
++
++health="$(docker exec "$container" python -c \
++    "import json,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2))['ok'])")"
++[ "$health" = "True" ] || {
++    echo "runtime verification failed: health endpoint is not OK" >&2
++    exit 1
++}
++
++printf 'RUNTIME_VERIFIED container=%s image=%s revision=%s\n' \
++    "$container" "$image_id" "$image_revision"
 diff --git a/tests/fakes.py b/tests/fakes.py
 index 167e85e..092efc3 100644
 --- a/tests/fakes.py
@@ -3800,10 +3899,10 @@ index d0d9b9e..9140c31 100644
          rid = self.client.post("/roulette/rounds").json()["roundId"]
 diff --git a/tests/test_operational_controls.py b/tests/test_operational_controls.py
 new file mode 100644
-index 0000000..6eca3de
+index 0000000..2da89e7
 --- /dev/null
 +++ b/tests/test_operational_controls.py
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,44 @@
 +import os
 +import unittest
 +from unittest.mock import patch
@@ -3842,6 +3941,8 @@ index 0000000..6eca3de
 +        self.assertEqual(metrics.status_code, 200)
 +        self.assertIn("canasino_chain_writes_enabled 0", metrics.text)
 +        self.assertIn("canasino_real_money_enabled 0", metrics.text)
++        self.assertIn("canasino_fair_randomness_v2 0", metrics.text)
++        self.assertIn("canasino_pending_custodial_joins 0", metrics.text)
 +
 +
 +if __name__ == "__main__":
