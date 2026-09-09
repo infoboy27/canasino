@@ -1,5 +1,6 @@
 import { jsonGet, jsonPost, websocket } from './api.js'
 import { cardCost, wireAmount } from './amounts.js'
+import { walletAuthorizedPost, walletOperation } from './auth.js'
 
 export async function getRooms() {
   const rooms = await jsonGet('/rooms')
@@ -33,11 +34,10 @@ export function getRoundInfo(roundId) {
   return jsonGet(`/rounds/${encodeURIComponent(roundId)}/info`)
 }
 
-export function registerRound(roundId, address, numCards) {
-  return jsonPost(`/rounds/${encodeURIComponent(roundId)}/register`, {
-    address,
-    num_cards: numCards,
-  })
+export function registerRound(roundId, address, numCards, txHash) {
+  const path = `/rounds/${encodeURIComponent(roundId)}/register`
+  const payload = walletOperation(address, txHash, { num_cards: numCards })
+  return walletAuthorizedPost({ path, account: { address }, action: 'join_room', resource: `round:${roundId}`, payload })
 }
 
 export function getCard(roundId, address, numCards) {

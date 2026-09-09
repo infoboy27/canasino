@@ -1,4 +1,5 @@
 import { jsonGet, jsonPost, websocket } from './api.js'
+import { walletAuthorizedPost, walletOperation } from './auth.js'
 
 export function openPokerRound() {
   return jsonPost('/poker/rounds')
@@ -8,8 +9,10 @@ export function joinPokerTable(roundId) {
   return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/join`)
 }
 
-export function registerPokerJoin(roundId, address) {
-  return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/register`, { address })
+export function registerPokerJoin(roundId, address, txHash) {
+  const path = `/poker/rounds/${encodeURIComponent(roundId)}/register`
+  const payload = walletOperation(address, txHash)
+  return walletAuthorizedPost({ path, account: { address }, action: 'join_poker', resource: `poker-round:${roundId}`, payload })
 }
 
 export function getPokerRoundInfo(roundId) {

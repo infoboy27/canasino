@@ -133,10 +133,10 @@ index 8512934..fcaa11e 100644
              raise ValueError("cannot debit a negative amount")
          if not self.can_afford(currency, amount):
 diff --git a/gameserver/app.py b/gameserver/app.py
-index 5e5d490..1a4e540 100644
+index 5e5d490..999739a 100644
 --- a/gameserver/app.py
 +++ b/gameserver/app.py
-@@ -62,9 +62,10 @@ import secrets
+@@ -62,20 +62,23 @@ import secrets
  import time
  from dataclasses import asdict
  
@@ -149,7 +149,13 @@ index 5e5d490..1a4e540 100644
  
  from engine import card as ecard, economy as econ, rules as erules
  from engine import roulette as eroulette
-@@ -76,6 +77,7 @@ from .rooms import RoomManager
+ from engine import domino as edomino
+ from engine import poker as epoker
+-from .chain import CanopyBridge, Key
++from .chain import CanopyBridge, Key, ReceiptInvalid, ReceiptPending
++from .auth import ALLOWED_ACTIONS, AuthError, WalletAuthorizer
+ from .db import Store
+ from .rooms import RoomManager
  from .roulette_rooms import RouletteManager
  from .domino_rooms import DominoManager
  from .poker_rooms import PokerManager
@@ -157,12 +163,19 @@ index 5e5d490..1a4e540 100644
  
  MAX_OPEN_ROUNDS_PER_ROOM = 5
  MAX_OPEN_ROUNDS_TOTAL = 20
-@@ -121,17 +123,17 @@ class CreateRound(BaseModel):
+@@ -120,18 +123,23 @@ class CreateRound(BaseModel):
+         return v
  
  
- class RegisterBody(BaseModel):
+-class RegisterBody(BaseModel):
 -    address: str
 -    num_cards: int = 1
++class WalletOperationBody(BaseModel):
++    operation_id: str | None = Field(default=None, min_length=36, max_length=36)
++    tx_hash: str | None = Field(default=None, pattern=r"^(?:0x)?[0-9a-fA-F]{64}$")
++
++
++class RegisterBody(WalletOperationBody):
 +    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
 +    num_cards: int = Field(default=1, strict=True, ge=1, le=4)
  
@@ -180,7 +193,7 @@ index 5e5d490..1a4e540 100644
  
  
  def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
-@@ -143,9 +145,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
+@@ -143,9 +151,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
  
  class RouletteBetBody(BaseModel):
      bet_type: str
@@ -193,11 +206,13 @@ index 5e5d490..1a4e540 100644
  
      @field_validator("amount")
      @classmethod
-@@ -157,10 +159,10 @@ class RouletteBetBody(BaseModel):
+@@ -156,11 +164,11 @@ class RouletteBetBody(BaseModel):
+         return v
  
  
- class RouletteRegisterBody(BaseModel):
+-class RouletteRegisterBody(BaseModel):
 -    address: str
++class RouletteRegisterBody(WalletOperationBody):
 +    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
      bet_type: str
 -    bet_number: int = 0
@@ -207,7 +222,7 @@ index 5e5d490..1a4e540 100644
  
      @field_validator("amount")
      @classmethod
-@@ -172,18 +174,18 @@ class RouletteRegisterBody(BaseModel):
+@@ -172,18 +180,18 @@ class RouletteRegisterBody(BaseModel):
  
  
  class DominoJoinBody(BaseModel):
@@ -215,8 +230,9 @@ index 5e5d490..1a4e540 100644
 +    nickname: str | None = Field(default=None, max_length=32)
  
  
- class DominoRegisterBody(BaseModel):
+-class DominoRegisterBody(BaseModel):
 -    address: str
++class DominoRegisterBody(WalletOperationBody):
 +    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
  
  
@@ -231,7 +247,7 @@ index 5e5d490..1a4e540 100644
  
      @field_validator("action")
      @classmethod
-@@ -194,17 +196,17 @@ class DominoMoveBody(BaseModel):
+@@ -194,17 +202,17 @@ class DominoMoveBody(BaseModel):
  
  
  class PokerJoinBody(BaseModel):
@@ -239,8 +255,9 @@ index 5e5d490..1a4e540 100644
 +    nickname: str | None = Field(default=None, max_length=32)
  
  
- class PokerRegisterBody(BaseModel):
+-class PokerRegisterBody(BaseModel):
 -    address: str
++class PokerRegisterBody(WalletOperationBody):
 +    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
  
  
@@ -253,7 +270,34 @@ index 5e5d490..1a4e540 100644
  
      @field_validator("action")
      @classmethod
-@@ -242,7 +244,7 @@ def _load_or_create_admin_token(store: Store) -> str:
+@@ -214,6 +222,26 @@ class PokerActionBody(BaseModel):
+         return v
+ 
+ 
++class AuthChallengeBody(BaseModel):
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
++    action: str
++    resource: str = Field(min_length=1, max_length=256)
++    payload_hash: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
++
++    @field_validator("action")
++    @classmethod
++    def _supported_action(cls, value: str) -> str:
++        if value not in ALLOWED_ACTIONS:
++            raise ValueError("unsupported authorization action")
++        return value
++
++
++class AuthVerifyBody(BaseModel):
++    challenge_id: str = Field(min_length=36, max_length=36)
++    public_key: str = Field(pattern=r"^[0-9a-fA-F]{96}$")
++    signature: str = Field(pattern=r"^[0-9a-fA-F]{192}$")
++
++
+ def _shop_item(item) -> dict:
+     d = asdict(item)
+     d["grants"] = asdict(item.grants)
+@@ -242,7 +270,7 @@ def _load_or_create_admin_token(store: Store) -> str:
          return token
      token = secrets.token_hex(24)
      store.save_setting("admin_token", token)
@@ -262,7 +306,23 @@ index 5e5d490..1a4e540 100644
            flush=True)
      print("[casino-gameserver] Set CASINO_ADMIN_TOKEN in the environment to control this explicitly.",
            flush=True)
-@@ -266,9 +268,12 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -252,8 +280,15 @@ def _load_or_create_admin_token(store: Store) -> str:
+ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -> FastAPI:
+     bridge = bridge or CanopyBridge()
+     store = store or Store()
++    bridge.store = store
+     operator = _load_or_create_operator(bridge, store)
+     admin_token = _load_or_create_admin_token(store)
++    wallet_authorizer = WalletAuthorizer(
++        store,
++        domain=os.environ.get("CASINO_AUTH_DOMAIN", "canasino.org"),
++        chain_id=bridge.chain_id,
++        network_id=bridge.network_id,
++    )
+     manager = RoomManager(bridge, operator, store=store)
+     roulette_manager = RouletteManager(bridge, operator, store=store)
+     domino_manager = DominoManager(bridge, operator, store=store)
+@@ -266,15 +301,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          "https://canasino.org,https://www.canasino.org"
      )
      cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
@@ -276,7 +336,14 @@ index 5e5d490..1a4e540 100644
      )
      app.state.manager = manager
      app.state.roulette_manager = roulette_manager
-@@ -300,9 +305,22 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+     app.state.domino_manager = domino_manager
+     app.state.poker_manager = poker_manager
+     app.state.store = store
++    app.state.wallet_authorizer = wallet_authorizer
+     chat_conns: dict[str, list[WebSocket]] = {}
+     domino_conns: dict[str, list[WebSocket]] = {}
+     poker_conns: dict[str, list[WebSocket]] = {}
+@@ -300,9 +339,142 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
              poker_conns[rid].remove(ws)
  
      def require_admin(authorization: str | None = Header(default=None)) -> None:
@@ -284,6 +351,98 @@ index 5e5d490..1a4e540 100644
 +        if not authorization or not secrets.compare_digest(authorization.encode(), f"Bearer {admin_token}".encode()):
              raise HTTPException(status_code=401, detail="admin token required")
  
++    def register_wallet_operation(
++        authorization: str | None,
++        *,
++        body: WalletOperationBody,
++        address: str,
++        action: str,
++        resource: str,
++        message_type: str,
++        expected_fields: dict,
++        apply,
++    ) -> dict | None:
++        """Verify, durably record and apply one wallet-funded registration.
++
++        Trusted operator calls remain available for recovery and existing
++        automation. Browser calls must present a one-use wallet grant bound to
++        this exact request body, then prove the exact finalized Canopy tx.
++        """
++        operator_header = f"Bearer {admin_token}"
++        if authorization and secrets.compare_digest(authorization.encode(), operator_header.encode()):
++            apply()
++            return None
++        prefix = "Canasino-Wallet "
++        if not authorization or not authorization.startswith(prefix):
++            raise AuthError("wallet authorization grant required")
++        token = authorization[len(prefix):]
++        if not token or token.strip() != token or " " in token:
++            raise AuthError("wallet authorization grant required")
++        if body.operation_id is None or body.tx_hash is None:
++            raise AuthError("operation_id and tx_hash are required", 422, "invalid_request")
++
++        operation = wallet_authorizer.authorize_operation(
++            token,
++            operation_id=body.operation_id,
++            address=address,
++            action=action,
++            resource=resource,
++            payload=body.model_dump(exclude_none=True),
++            tx_hash=body.tx_hash,
++        )
++        if operation["state"] == "REJECTED":
++            raise AuthError("operation was permanently rejected", 409, "operation_rejected")
++        if operation["state"] == "APPLIED":
++            return operation
++
++        if operation["state"] in ("AUTHORIZED", "PENDING"):
++            try:
++                receipt = bridge.transaction_receipt(
++                    operation["tx_hash"], sender=address, message_type=message_type,
++                    expected_fields=expected_fields,
++                )
++            except ReceiptPending as exc:
++                store.transition_operation(
++                    operation["operation_id"], operation["state"], "PENDING", int(time.time()),
++                    error_code="receipt_pending", error_detail=str(exc),
++                )
++                raise HTTPException(
++                    status_code=425,
++                    detail={"code": "receipt_pending", "operationId": operation["operation_id"],
++                            "message": str(exc)},
++                    headers={"Retry-After": "2"},
++                ) from exc
++            except ReceiptInvalid as exc:
++                store.transition_operation(
++                    operation["operation_id"], operation["state"], "REJECTED", int(time.time()),
++                    error_code="receipt_invalid", error_detail=str(exc),
++                )
++                raise HTTPException(
++                    status_code=422,
++                    detail={"code": "receipt_invalid", "operationId": operation["operation_id"],
++                            "message": str(exc)},
++                ) from exc
++            store.transition_operation(
++                operation["operation_id"], operation["state"], "FINALIZED", int(time.time()),
++                receipt_height=receipt["height"],
++            )
++            operation = store.get_operation(operation["operation_id"])
++
++        if operation and operation["state"] == "FINALIZED":
++            apply()
++            store.transition_operation(
++                operation["operation_id"], "FINALIZED", "APPLIED", int(time.time()),
++                receipt_height=operation["receipt_height"],
++            )
++            operation = store.get_operation(operation["operation_id"])
++        return operation
++
++    def operation_response(operation: dict | None) -> dict:
++        if operation is None:
++            return {}
++        return {"operationId": operation["operation_id"], "operationState": operation["state"],
++                "txHash": operation["tx_hash"], "receiptHeight": operation["receipt_height"]}
++
 +    @app.exception_handler(KeyError)
 +    async def missing_resource(request, exc):
 +        return JSONResponse({"detail": "Resource not found"}, status_code=404)
@@ -291,6 +450,34 @@ index 5e5d490..1a4e540 100644
 +    @app.exception_handler(ValueError)
 +    async def invalid_request(request, exc):
 +        return JSONResponse({"detail": "Invalid request or game state"}, status_code=422)
++
++    @app.exception_handler(AuthError)
++    async def invalid_wallet_proof(request, exc: AuthError):
++        return JSONResponse({"detail": str(exc), "code": exc.code}, status_code=exc.status_code,
++                            headers={"Cache-Control": "no-store"})
++
++    @app.post("/auth/challenges")
++    def create_wallet_challenge(body: AuthChallengeBody):
++        challenge = wallet_authorizer.create_challenge(
++            address=body.address, action=body.action, resource=body.resource,
++            body_hash=body.payload_hash,
++        )
++        return {
++            "challengeId": challenge.challenge_id,
++            "message": challenge.message,
++            "messageHex": challenge.message_hex,
++            "expiresAt": challenge.expires_at,
++            "algorithm": "BLS12-381-BASIC",
++        }
++
++    @app.post("/auth/verify")
++    def verify_wallet_challenge(body: AuthVerifyBody):
++        token = wallet_authorizer.verify_challenge(
++            challenge_id=body.challenge_id,
++            public_key=body.public_key,
++            signature=body.signature,
++        )
++        return {"grant": token, "scheme": "Canasino-Wallet", "singleUse": True}
 +
 +    @app.get("/capabilities")
 +    def capabilities():
@@ -300,7 +487,7 @@ index 5e5d490..1a4e540 100644
      @app.get("/health")
      def health():
          return {"ok": True, "operator": operator.address, "rounds": len(manager.rounds),
-@@ -343,7 +361,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -343,7 +515,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          ]
  
      @app.get("/players/{address}/wallet")
@@ -309,7 +496,7 @@ index 5e5d490..1a4e540 100644
          """Available (on-chain account balance) + locked (escrowed in open
          rounds) + settled-round history, in one call for the Wallet screen."""
          addr = address.lower()
-@@ -356,11 +374,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -356,11 +528,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          }
  
      @app.get("/players/{address}/gems")
@@ -323,7 +510,31 @@ index 5e5d490..1a4e540 100644
          """Admin-only: there is no payment processor yet, so gems are normally
          minted by the operator once a real IAP clears. Requires the admin
          token — never reachable from client code without it."""
-@@ -436,17 +454,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -407,11 +579,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+     # --- wallet-signed join support (FleetWallet bingo_join) ------------------
+ 
+     @app.post("/rounds/{rid}/register")
+-    def register(rid: str, body: RegisterBody):
++    def register(rid: str, body: RegisterBody, authorization: str | None = Header(default=None)):
+         """Register a wallet-signed player (after their bingo_join tx). Lets the
+         live draw + settle reporting include them; on-chain settle already does."""
+-        addr = manager.register_external(rid, body.address, body.num_cards)
+-        return {"player": addr, "numCards": body.num_cards}
++        rnd = manager.rounds[rid]
++        address = body.address.lower()
++        amount = rnd.entry_fee * econ.CARD_COST_MULTIPLIER_BPS[body.num_cards] // 10_000
++        operation = register_wallet_operation(
++            authorization, body=body, address=address, action="join_room", resource=f"round:{rid}",
++            message_type="join_room",
++            expected_fields={"playerAddress": address, "roundId": rid, "numCards": body.num_cards,
++                             "amount": amount},
++            apply=lambda: manager.register_external(rid, address, body.num_cards),
++        )
++        return {"player": address, "numCards": body.num_cards, **operation_response(operation)}
+ 
+     @app.get("/rounds/{rid}/info")
+     def round_info(rid: str):
+@@ -436,17 +617,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/rounds/{rid}/card")
@@ -346,7 +557,7 @@ index 5e5d490..1a4e540 100644
          return store.history_for(address.lower(), limit)
  
      @app.get("/players/{address}/stats")
-@@ -454,7 +475,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -454,7 +638,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return store.stats_for(address.lower())
  
      @app.get("/leaderboard")
@@ -355,7 +566,34 @@ index 5e5d490..1a4e540 100644
          if period not in ("daily", "weekly", "monthly", "alltime"):
              period = "alltime"
          return store.leaderboard(period, limit)
-@@ -519,7 +540,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -488,13 +672,21 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+     # --- wallet-signed bet support (mirrors Bingo's bingo_join path) -----------
+ 
+     @app.post("/roulette/rounds/{rid}/register")
+-    def roulette_register(rid: str, body: RouletteRegisterBody):
++    def roulette_register(rid: str, body: RouletteRegisterBody,
++                          authorization: str | None = Header(default=None)):
+         """Register a wallet-signed bettor (after their own roulette_bet tx).
+         Lets settle reporting include them; on-chain settle already pays them."""
+-        addr = roulette_manager.register_external_bet(rid, body.address, body.bet_type,
+-                                                       body.bet_number, body.amount)
+-        return {"player": addr, "betType": body.bet_type, "betNumber": body.bet_number,
+-                "amount": body.amount}
++        address = body.address.lower()
++        operation = register_wallet_operation(
++            authorization, body=body, address=address, action="roulette_bet",
++            resource=f"roulette-round:{rid}", message_type="roulette_bet",
++            expected_fields={"playerAddress": address, "roundId": rid, "betType": body.bet_type,
++                             "betNumber": body.bet_number, "amount": body.amount},
++            apply=lambda: roulette_manager.register_external_bet(
++                rid, address, body.bet_type, body.bet_number, body.amount),
++        )
++        return {"player": address, "betType": body.bet_type, "betNumber": body.bet_number,
++                "amount": body.amount, **operation_response(operation)}
+ 
+     @app.get("/roulette/rounds/{rid}/info")
+     def roulette_round_info(rid: str):
+@@ -519,7 +711,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/roulette/history")
@@ -364,7 +602,33 @@ index 5e5d490..1a4e540 100644
          return store.roulette_history_for(address.lower(), limit)
  
      @app.websocket("/ws/roulette/{rid}")
-@@ -600,10 +621,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -567,13 +759,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         return {"player": addr, "seat": domino_manager.rounds[rid].player_order.index(addr)}
+ 
+     @app.post("/domino/rounds/{rid}/register")
+-    def register_domino(rid: str, body: DominoRegisterBody):
++    def register_domino(rid: str, body: DominoRegisterBody,
++                        authorization: str | None = Header(default=None)):
+         """Register a wallet-signed player (after their own join_domino tx)."""
+-        try:
+-            addr = domino_manager.register_external(rid, body.address)
+-        except ValueError as exc:
+-            raise HTTPException(status_code=422, detail=str(exc))
+-        return {"player": addr, "seat": domino_manager.rounds[rid].player_order.index(addr)}
++        address = body.address.lower()
++        rnd = domino_manager.rounds[rid]
++        operation = register_wallet_operation(
++            authorization, body=body, address=address, action="join_domino",
++            resource=f"domino-round:{rid}", message_type="join_domino",
++            expected_fields={"playerAddress": address, "roundId": rid, "amount": rnd.entry_fee},
++            apply=lambda: domino_manager.register_external(rid, address),
++        )
++        return {"player": address, "seat": rnd.player_order.index(address),
++                **operation_response(operation)}
+ 
+     @app.get("/domino/rounds/{rid}")
+     def get_domino_round(rid: str):
+@@ -600,10 +798,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": domino_manager.bridge.query_url}
  
      @app.get("/domino/rounds/{rid}/hand")
@@ -377,7 +641,7 @@ index 5e5d490..1a4e540 100644
          hand = domino_manager.hand_for(rid, address.lower())
          return {"address": address.lower(), "hand": [list(t) for t in hand]}
  
-@@ -620,7 +639,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -620,7 +816,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/domino/history")
@@ -386,7 +650,33 @@ index 5e5d490..1a4e540 100644
          return store.domino_history_for(address.lower(), limit)
  
      @app.post("/domino/rounds/{rid}/move")
-@@ -748,9 +767,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -709,13 +905,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         return {"player": addr, "seat": poker_manager.rounds[rid].player_order.index(addr)}
+ 
+     @app.post("/poker/rounds/{rid}/register")
+-    def register_poker(rid: str, body: PokerRegisterBody):
++    def register_poker(rid: str, body: PokerRegisterBody,
++                       authorization: str | None = Header(default=None)):
+         """Register a wallet-signed player (after their own join_poker tx)."""
+-        try:
+-            addr = poker_manager.register_external(rid, body.address)
+-        except ValueError as exc:
+-            raise HTTPException(status_code=422, detail=str(exc))
+-        return {"player": addr, "seat": poker_manager.rounds[rid].player_order.index(addr)}
++        address = body.address.lower()
++        rnd = poker_manager.rounds[rid]
++        operation = register_wallet_operation(
++            authorization, body=body, address=address, action="join_poker",
++            resource=f"poker-round:{rid}", message_type="join_poker",
++            expected_fields={"playerAddress": address, "roundId": rid, "amount": rnd.buy_in},
++            apply=lambda: poker_manager.register_external(rid, address),
++        )
++        return {"player": address, "seat": rnd.player_order.index(address),
++                **operation_response(operation)}
+ 
+     @app.get("/poker/rounds/{rid}")
+     def get_poker_round(rid: str):
+@@ -748,9 +950,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": poker_manager.bridge.query_url}
  
      @app.get("/poker/rounds/{rid}/hand")
@@ -398,7 +688,7 @@ index 5e5d490..1a4e540 100644
          hole = poker_manager.hole_cards_for(rid, address.lower())
          return {"address": address.lower(), "hole": [list(c) for c in hole]}
  
-@@ -758,7 +776,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -758,7 +959,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      def poker_proof(rid: str):
          rnd = poker_manager.rounds[rid]
          settled = rnd.status == "settled"
@@ -407,7 +697,7 @@ index 5e5d490..1a4e540 100644
          return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
                  "seed": rnd.seed.hex() if settled else None,
                  "actions": rnd.actions if settled else None,
-@@ -770,7 +788,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -770,7 +971,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/poker/history")
@@ -416,8 +706,540 @@ index 5e5d490..1a4e540 100644
          return store.poker_history_for(address.lower(), limit)
  
      @app.post("/poker/rounds/{rid}/action")
+diff --git a/gameserver/auth.py b/gameserver/auth.py
+new file mode 100644
+index 0000000..4160f20
+--- /dev/null
++++ b/gameserver/auth.py
+@@ -0,0 +1,183 @@
++"""Wallet-bound, one-use authorization challenges for economic operations.
++
++FleetWallet must sign the exact UTF-8 bytes returned in ``messageHex`` using
++Canopy's BLS12-381 Basic scheme.  A successful proof yields a short-lived,
++single-use grant bound to one action, resource and canonical payload hash.
++The grant is not a login cookie and cannot authorize a different operation.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import secrets
++import time
++import uuid
++from dataclasses import dataclass
++from typing import Any, Callable
++
++from blspy import BasicSchemeMPL, G1Element, G2Element
++
++from .db import Store
++
++AUTH_VERSION = "CANASINO-AUTH-V1"
++ALLOWED_ACTIONS = frozenset({
++    "join_room", "roulette_bet", "join_domino", "domino_move",
++    "join_poker", "poker_action", "read_private_state",
++})
++
++
++class AuthError(ValueError):
++    def __init__(self, message: str, status_code: int = 401, code: str = "invalid_wallet_proof"):
++        super().__init__(message)
++        self.status_code = status_code
++        self.code = code
++
++
++def canonical_json(value: Any) -> bytes:
++    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
++
++
++def payload_hash(payload: Any) -> str:
++    return hashlib.sha256(canonical_json(payload)).hexdigest()
++
++
++def _decode_hex(value: str, expected_bytes: int, label: str) -> bytes:
++    if not isinstance(value, str) or len(value) != expected_bytes * 2:
++        raise AuthError(f"invalid {label}")
++    try:
++        return bytes.fromhex(value)
++    except ValueError as exc:
++        raise AuthError(f"invalid {label}") from exc
++
++
++@dataclass(frozen=True)
++class Challenge:
++    challenge_id: str
++    message: str
++    message_hex: str
++    expires_at: int
++
++
++class WalletAuthorizer:
++    def __init__(
++        self,
++        store: Store,
++        *,
++        domain: str,
++        chain_id: int,
++        network_id: int,
++        challenge_ttl: int = 120,
++        grant_ttl: int = 90,
++        clock: Callable[[], float] = time.time,
++    ):
++        if not domain or len(domain) > 253:
++            raise ValueError("CASINO_AUTH_DOMAIN must be a valid non-empty domain")
++        self.store = store
++        self.domain = domain.lower()
++        self.chain_id = chain_id
++        self.network_id = network_id
++        self.challenge_ttl = challenge_ttl
++        self.grant_ttl = grant_ttl
++        self.clock = clock
++
++    def create_challenge(self, *, address: str, action: str, resource: str, body_hash: str) -> Challenge:
++        address = address.lower()
++        if len(address) != 40:
++            raise AuthError("invalid wallet address", 422, "invalid_request")
++        _decode_hex(address, 20, "wallet address")
++        if action not in ALLOWED_ACTIONS:
++            raise AuthError("unsupported authorization action", 422, "invalid_request")
++        if not resource or len(resource) > 256:
++            raise AuthError("invalid authorization resource", 422, "invalid_request")
++        _decode_hex(body_hash.lower(), 32, "payload hash")
++
++        now = int(self.clock())
++        if self.store.count_recent_auth_challenges(address, now - 60) >= 5:
++            raise AuthError("too many outstanding wallet challenges", 429, "rate_limited")
++        challenge_id = str(uuid.uuid4())
++        expires_at = now + self.challenge_ttl
++        fields = {
++            "action": action,
++            "address": address,
++            "challengeId": challenge_id,
++            "chainId": self.chain_id,
++            "domain": self.domain,
++            "expiresAt": expires_at,
++            "issuedAt": now,
++            "networkId": self.network_id,
++            "nonce": secrets.token_hex(32),
++            "payloadHash": body_hash.lower(),
++            "resource": resource,
++            "version": AUTH_VERSION,
++        }
++        message_bytes = canonical_json(fields)
++        message = message_bytes.decode("utf-8")
++        self.store.create_auth_challenge(
++            challenge_id, address, action, resource, body_hash.lower(), message, now, expires_at,
++        )
++        return Challenge(challenge_id, message, message_bytes.hex(), expires_at)
++
++    def verify_challenge(self, *, challenge_id: str, public_key: str, signature: str) -> str:
++        record = self.store.get_auth_challenge(challenge_id)
++        now = int(self.clock())
++        if not record or record["used_at"] is not None or record["expires_at"] < now:
++            raise AuthError("wallet challenge is missing, expired or already used")
++
++        public_key_bytes = _decode_hex(public_key.lower(), 48, "public key")
++        signature_bytes = _decode_hex(signature.lower(), 96, "signature")
++        derived_address = hashlib.sha256(public_key_bytes).digest()[:20].hex()
++        if not secrets.compare_digest(derived_address, record["address"]):
++            raise AuthError("public key does not control the requested address")
++        try:
++            valid = BasicSchemeMPL.verify(
++                G1Element.from_bytes(public_key_bytes),
++                record["message"].encode("utf-8"),
++                G2Element.from_bytes(signature_bytes),
++            )
++        except (ValueError, RuntimeError) as exc:
++            raise AuthError("invalid wallet signature") from exc
++        if not valid:
++            raise AuthError("invalid wallet signature")
++        if not self.store.consume_auth_challenge(challenge_id, now):
++            raise AuthError("wallet challenge is missing, expired or already used")
++
++        raw_token = secrets.token_urlsafe(32)
++        token_hash = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
++        self.store.create_wallet_grant(
++            token_hash, record["address"], record["action"], record["resource"],
++            record["payload_hash"], now, now + self.grant_ttl,
++        )
++        return raw_token
++
++    def consume_grant(self, token: str, *, address: str, action: str, resource: str, payload: Any) -> None:
++        if not token or len(token) > 256:
++            raise AuthError("wallet authorization grant required")
++        token_hash = hashlib.sha256(token.encode("ascii", "strict")).hexdigest()
++        accepted = self.store.consume_wallet_grant(
++            token_hash, address.lower(), action, resource, payload_hash(payload), int(self.clock()),
++        )
++        if not accepted:
++            raise AuthError("wallet authorization grant is invalid, expired, used or payload-mismatched")
++
++    def authorize_operation(self, token: str, *, operation_id: str, address: str,
++                            action: str, resource: str, payload: Any, tx_hash: str) -> dict:
++        try:
++            uuid.UUID(operation_id)
++        except (TypeError, ValueError) as exc:
++            raise AuthError("invalid operation id", 422, "invalid_request") from exc
++        normalized_tx_hash = tx_hash.removeprefix("0x").lower()
++        _decode_hex(normalized_tx_hash, 32, "transaction hash")
++        if not token or len(token) > 256:
++            raise AuthError("wallet authorization grant required")
++        token_hash = hashlib.sha256(token.encode("ascii", "strict")).hexdigest()
++        try:
++            operation = self.store.authorize_operation(
++                token_hash, operation_id, address.lower(), action, resource,
++                payload_hash(payload), normalized_tx_hash, int(self.clock()),
++            )
++        except ValueError as exc:
++            raise AuthError(str(exc), 409, "operation_conflict") from exc
++        if not operation:
++            raise AuthError("wallet authorization grant is invalid, expired, used or payload-mismatched")
++        return operation
+diff --git a/gameserver/chain.py b/gameserver/chain.py
+index 44ddc65..3c28383 100644
+--- a/gameserver/chain.py
++++ b/gameserver/chain.py
+@@ -58,10 +58,18 @@ class Key:
+         return bytes.fromhex(self.address)
+ 
+ 
++class ReceiptPending(RuntimeError):
++    """The transaction is not yet committed with the required finality."""
++
++
++class ReceiptInvalid(RuntimeError):
++    """The committed transaction does not match the authorized operation."""
++
++
+ class CanopyBridge:
+     def __init__(self, query_url="http://localhost:50102", admin_url="http://localhost:50103",
+                  plugin_url="http://localhost:50110", network_id=1, chain_id=1, fee=10_000,
+-                 keystore_password="gameserver-pw"):
++                 keystore_password="gameserver-pw", finality_confirmations=2):
+         self.query_url = query_url
+         self.admin_url = admin_url
+         self.plugin_url = plugin_url
+@@ -69,6 +77,8 @@ class CanopyBridge:
+         self.chain_id = chain_id
+         self.fee = fee
+         self.pwd = keystore_password
++        self.finality_confirmations = finality_confirmations
++        self.store = None
+ 
+     # -- http ----------------------------------------------------------------
+ 
+@@ -117,26 +127,87 @@ class CanopyBridge:
+         tx.chain_id = self.chain_id
+         return tx.SerializeToString()
+ 
+-    def submit(self, signer: Key, msg_type: str, msg_bytes: bytes) -> str:
++    def _signed_transaction(self, signer: Key, msg_type: str, msg_bytes: bytes) -> tuple[dict, str]:
+         type_url = TYPE_URL[msg_type]
+         height = self.height()
+         tx_time = int(time.time() * 1_000_000)
+         sign_bytes = self._sign_bytes(msg_type, type_url, msg_bytes, tx_time, height)
+         sk = PrivateKey.from_bytes(bytes.fromhex(signer.private_key))
+         sig = bytes(BasicSchemeMPL.sign(sk, sign_bytes))
+-        tx = {
++        wire_tx = {
+             "type": msg_type, "msgTypeUrl": type_url, "msgBytes": msg_bytes.hex(),
+             "signature": {"publicKey": signer.public_key, "signature": sig.hex()},
+             "time": tx_time, "createdHeight": height, "fee": self.fee, "memo": "",
+             "networkID": self.network_id, "chainID": self.chain_id,
+         }
+-        return json.loads(self._post(f"{self.query_url}/v1/tx", tx))
+ 
+-    def submit_and_wait(self, signer: Key, msg_type: str, msg_bytes: bytes, timeout=150.0) -> str:
+-        txh = self.submit(signer, msg_type, msg_bytes)
+-        if not self.wait_inclusion(signer.address, txh, timeout):
+-            raise TimeoutError(f"{msg_type} tx {txh} not included in {timeout}s")
+-        return txh
++        # Canopy's native transaction id is SHA-256 of the final protobuf
++        # transaction bytes. Compute it before submission so a response cannot
++        # redirect reconciliation to a different transaction.
++        any_msg = any_pb2.Any(type_url=type_url, value=msg_bytes)
++        signed_tx = tx_pb2.Transaction()
++        signed_tx.message_type = msg_type
++        signed_tx.msg.CopyFrom(any_msg)
++        signed_tx.signature.public_key = bytes.fromhex(signer.public_key)
++        signed_tx.signature.signature = sig
++        signed_tx.created_height = height
++        signed_tx.time = tx_time
++        signed_tx.fee = self.fee
++        signed_tx.network_id = self.network_id
++        signed_tx.chain_id = self.chain_id
++        tx_hash = hashlib.sha256(signed_tx.SerializeToString()).hexdigest()
++        return wire_tx, tx_hash
++
++    def submit(self, signer: Key, msg_type: str, msg_bytes: bytes,
++               operation_id: str | None = None) -> str:
++        payload_digest = hashlib.sha256(msg_bytes).hexdigest()
++        existing = self.store.get_chain_submission(operation_id) if self.store and operation_id else None
++        if existing:
++            if (existing["sender"], existing["message_type"], existing["payload_hash"]) != (
++                    signer.address, msg_type, payload_digest):
++                raise ValueError("chain operation id already belongs to different content")
++            tx, expected_hash = json.loads(existing["tx_json"]), existing["tx_hash"]
++            if existing["state"] == "FINALIZED":
++                return expected_hash
++        else:
++            tx, expected_hash = self._signed_transaction(signer, msg_type, msg_bytes)
++            if self.store and operation_id:
++                self.store.prepare_chain_submission(
++                    operation_id, signer.address, msg_type, payload_digest,
++                    json.dumps(tx, sort_keys=True, separators=(",", ":")), expected_hash, int(time.time()),
++                )
++        try:
++            response = json.loads(self._post(f"{self.query_url}/v1/tx", tx))
++            reported_hash = response.get("txHash") if isinstance(response, dict) else response
++            if not isinstance(reported_hash, str) or reported_hash.removeprefix("0x").lower() != expected_hash:
++                raise ReceiptInvalid("submission returned an unexpected transaction hash")
++        except ReceiptInvalid:
++            raise
++        except Exception:
++            # The request can fail after the node accepted it. The locally
++            # computed exact hash is sufficient to reconcile without creating
++            # a second differently-signed transaction.
++            if not (self.store and operation_id):
++                raise
++        if self.store and operation_id:
++            self.store.mark_chain_submission(operation_id, "SUBMITTED", int(time.time()))
++        return expected_hash
++
++    def submit_and_wait(self, signer: Key, msg_type: str, msg_bytes: bytes, timeout=150.0,
++                        operation_id: str | None = None) -> str:
++        txh = self.submit(signer, msg_type, msg_bytes, operation_id=operation_id)
++        deadline = time.time() + timeout
++        while time.time() < deadline:
++            try:
++                receipt = self.transaction_receipt(txh, sender=signer.address, message_type=msg_type)
++                if self.store and operation_id:
++                    self.store.mark_chain_submission(
++                        operation_id, "FINALIZED", int(time.time()), receipt_height=receipt["height"],
++                    )
++                return txh
++            except ReceiptPending:
++                time.sleep(1)
++        raise TimeoutError(f"{msg_type} tx {txh} did not reach finality in {timeout}s")
+ 
+     # -- typed transactions --------------------------------------------------
+ 
+@@ -145,10 +216,10 @@ class CanopyBridge:
+                                  recipient_address=bytes.fromhex(recipient), amount=amount)
+         return self.submit_and_wait(signer, "faucet", m.SerializeToString())
+ 
+-    def buy_coins(self, admin: Key, recipient: str, amount: int):
++    def buy_coins(self, admin: Key, recipient: str, amount: int, operation_id: str | None = None):
+         m = tx_pb2.MessageBuyCoins(admin_address=admin.addr_bytes,
+                                    recipient_address=bytes.fromhex(recipient), amount=amount)
+-        return self.submit_and_wait(admin, "buy_coins", m.SerializeToString())
++        return self.submit_and_wait(admin, "buy_coins", m.SerializeToString(), operation_id=operation_id)
+ 
+     def buy_gems(self, admin: Key, recipient: str, amount: int):
+         m = tx_pb2.MessageBuyGems(admin_address=admin.addr_bytes,
+@@ -156,54 +227,62 @@ class CanopyBridge:
+         return self.submit_and_wait(admin, "buy_gems", m.SerializeToString())
+ 
+     def open_room(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int,
+-                  rake_bps: int, payout_weights_bps):
++                  rake_bps: int, payout_weights_bps, operation_id: str | None = None):
+         m = tx_pb2.MessageOpenRoom(operator_address=operator.addr_bytes, round_id=round_id,
+                                    commitment=commitment, entry_fee=entry_fee, rake_bps=rake_bps,
+                                    payout_weights_bps=payout_weights_bps)
+-        return self.submit_and_wait(operator, "open_room", m.SerializeToString())
++        return self.submit_and_wait(operator, "open_room", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def join_room(self, player: Key, round_id: bytes, num_cards: int, amount: int):
++    def join_room(self, player: Key, round_id: bytes, num_cards: int, amount: int,
++                  operation_id: str | None = None):
+         m = tx_pb2.MessageJoinRoom(player_address=player.addr_bytes, round_id=round_id,
+                                    num_cards=num_cards, amount=amount)
+-        return self.submit_and_wait(player, "join_room", m.SerializeToString())
++        return self.submit_and_wait(player, "join_room", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line"):
++    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line",
++                    operation_id: str | None = None):
+         m = tx_pb2.MessageSettleRoom(operator_address=operator.addr_bytes, round_id=round_id,
+                                      seed=seed, pattern=pattern)
+-        return self.submit_and_wait(operator, "settle_room", m.SerializeToString())
++        return self.submit_and_wait(operator, "settle_room", m.SerializeToString(), operation_id=operation_id)
+ 
+     def buy_cosmetic(self, player: Key, token_id: bytes, kind: str):
+         m = tx_pb2.MessageBuyCosmetic(player_address=player.addr_bytes, token_id=token_id, kind=kind)
+         return self.submit_and_wait(player, "buy_cosmetic", m.SerializeToString())
+ 
+-    def open_roulette(self, operator: Key, round_id: bytes, commitment: bytes, rake_bps: int):
++    def open_roulette(self, operator: Key, round_id: bytes, commitment: bytes, rake_bps: int,
++                      operation_id: str | None = None):
+         m = tx_pb2.MessageOpenRoulette(operator_address=operator.addr_bytes, round_id=round_id,
+                                        commitment=commitment, rake_bps=rake_bps)
+-        return self.submit_and_wait(operator, "open_roulette", m.SerializeToString())
++        return self.submit_and_wait(operator, "open_roulette", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def roulette_bet(self, player: Key, round_id: bytes, bet_type: str, bet_number: int, amount: int):
++    def roulette_bet(self, player: Key, round_id: bytes, bet_type: str, bet_number: int, amount: int,
++                     operation_id: str | None = None):
+         m = tx_pb2.MessageRouletteBet(player_address=player.addr_bytes, round_id=round_id,
+                                       bet_type=bet_type, bet_number=bet_number, amount=amount)
+-        return self.submit_and_wait(player, "roulette_bet", m.SerializeToString())
++        return self.submit_and_wait(player, "roulette_bet", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes):
++    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes,
++                        operation_id: str | None = None):
+         m = tx_pb2.MessageSettleRoulette(operator_address=operator.addr_bytes, round_id=round_id, seed=seed)
+-        return self.submit_and_wait(operator, "settle_roulette", m.SerializeToString())
++        return self.submit_and_wait(operator, "settle_roulette", m.SerializeToString(), operation_id=operation_id)
+ 
+     def expire_roulette(self, caller: Key, round_id: bytes):
+         m = tx_pb2.MessageExpireRoulette(caller_address=caller.addr_bytes, round_id=round_id)
+         return self.submit_and_wait(caller, "expire_roulette", m.SerializeToString())
+ 
+-    def open_domino(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int, rake_bps: int):
++    def open_domino(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int, rake_bps: int,
++                    operation_id: str | None = None):
+         m = tx_pb2.MessageOpenDomino(operator_address=operator.addr_bytes, round_id=round_id,
+                                      commitment=commitment, entry_fee=entry_fee, rake_bps=rake_bps)
+-        return self.submit_and_wait(operator, "open_domino", m.SerializeToString())
++        return self.submit_and_wait(operator, "open_domino", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def join_domino(self, player: Key, round_id: bytes, amount: int):
++    def join_domino(self, player: Key, round_id: bytes, amount: int,
++                    operation_id: str | None = None):
+         m = tx_pb2.MessageJoinDomino(player_address=player.addr_bytes, round_id=round_id, amount=amount)
+-        return self.submit_and_wait(player, "join_domino", m.SerializeToString())
++        return self.submit_and_wait(player, "join_domino", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves):
++    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves,
++                      operation_id: str | None = None):
+         """`moves` is a list of (action, tile_low, tile_high, end) tuples --
+         kept as plain tuples here (not domino.Move) so this bridge has no
+         import dependency on the engine package."""
+@@ -211,31 +290,33 @@ class CanopyBridge:
+                         for a, lo, hi, e in moves]
+         m = tx_pb2.MessageSettleDomino(operator_address=operator.addr_bytes, round_id=round_id,
+                                        seed=seed, moves=proto_moves)
+-        return self.submit_and_wait(operator, "settle_domino", m.SerializeToString())
++        return self.submit_and_wait(operator, "settle_domino", m.SerializeToString(), operation_id=operation_id)
+ 
+     def expire_domino(self, caller: Key, round_id: bytes):
+         m = tx_pb2.MessageExpireDomino(caller_address=caller.addr_bytes, round_id=round_id)
+         return self.submit_and_wait(caller, "expire_domino", m.SerializeToString())
+ 
+     def open_poker(self, operator: Key, round_id: bytes, commitment: bytes, small_blind: int,
+-                   big_blind: int, buy_in: int, rake_bps: int):
++                   big_blind: int, buy_in: int, rake_bps: int, operation_id: str | None = None):
+         m = tx_pb2.MessageOpenPoker(operator_address=operator.addr_bytes, round_id=round_id,
+                                     commitment=commitment, small_blind=small_blind, big_blind=big_blind,
+                                     buy_in=buy_in, rake_bps=rake_bps)
+-        return self.submit_and_wait(operator, "open_poker", m.SerializeToString())
++        return self.submit_and_wait(operator, "open_poker", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def join_poker(self, player: Key, round_id: bytes, amount: int):
++    def join_poker(self, player: Key, round_id: bytes, amount: int,
++                   operation_id: str | None = None):
+         m = tx_pb2.MessageJoinPoker(player_address=player.addr_bytes, round_id=round_id, amount=amount)
+-        return self.submit_and_wait(player, "join_poker", m.SerializeToString())
++        return self.submit_and_wait(player, "join_poker", m.SerializeToString(), operation_id=operation_id)
+ 
+-    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions):
++    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions,
++                     operation_id: str | None = None):
+         """`actions` is a list of (action, amount) tuples -- kept as plain
+         tuples here (not poker.PokerAction) so this bridge has no import
+         dependency on the engine package."""
+         proto_actions = [tx_pb2.PokerActionRecord(action=a, amount=amt) for a, amt in actions]
+         m = tx_pb2.MessageSettlePoker(operator_address=operator.addr_bytes, round_id=round_id,
+                                       seed=seed, actions=proto_actions)
+-        return self.submit_and_wait(operator, "settle_poker", m.SerializeToString())
++        return self.submit_and_wait(operator, "settle_poker", m.SerializeToString(), operation_id=operation_id)
+ 
+     def expire_poker(self, caller: Key, round_id: bytes):
+         m = tx_pb2.MessageExpirePoker(caller_address=caller.addr_bytes, round_id=round_id)
+@@ -260,15 +341,74 @@ class CanopyBridge:
+             return None
+ 
+     def wait_inclusion(self, sender_addr: str, tx_hash: str, timeout=150.0) -> bool:
++        """Deprecated compatibility wrapper; exact-hash lookup replaces sender windows."""
+         deadline = time.time() + timeout
+         while time.time() < deadline:
+             try:
+-                res = json.loads(self._post(f"{self.query_url}/v1/query/txs-by-sender",
+-                                            {"address": sender_addr, "perPage": 20}))
+-                for tx in (res.get("results") or []):
+-                    if tx.get("txHash") == tx_hash:
+-                        return True
++                result = json.loads(self._post(
++                    f"{self.query_url}/v1/query/tx-by-hash", {"hash": tx_hash.removeprefix("0x").lower()},
++                ))
++                if (result.get("committed") is True and
++                        result.get("txHash", "").removeprefix("0x").lower() == tx_hash.removeprefix("0x").lower() and
++                        result.get("sender", "").lower() == sender_addr.lower()):
++                    return True
+             except Exception:
+                 pass
+             time.sleep(1)
+         return False
++
++    def transaction_receipt(self, tx_hash: str, *, sender: str, message_type: str,
++                            expected_fields: dict | None = None) -> dict:
++        """Verify one exact committed transaction and its confirmation depth.
++
++        Failed Canopy transactions are not committed/indexed, so only a
++        committed tx-by-hash result with the expected signer, type, network,
++        chain and message fields is accepted.
++        """
++        normalized_hash = tx_hash.removeprefix("0x").lower()
++        if len(normalized_hash) != 64:
++            raise ReceiptInvalid("invalid transaction hash")
++        try:
++            bytes.fromhex(normalized_hash)
++        except ValueError as exc:
++            raise ReceiptInvalid("invalid transaction hash") from exc
++        try:
++            result = json.loads(self._post(
++                f"{self.query_url}/v1/query/tx-by-hash", {"hash": normalized_hash},
++            ))
++        except Exception as exc:
++            raise ReceiptPending("transaction is not indexed yet") from exc
++        if result.get("txHash", "").removeprefix("0x").lower() != normalized_hash:
++            raise ReceiptInvalid("transaction hash mismatch")
++        if result.get("committed") is not True:
++            raise ReceiptPending("transaction is still pending")
++        if str(result.get("sender", "")).lower() != sender.lower():
++            raise ReceiptInvalid("transaction signer mismatch")
++        if result.get("messageType") != message_type:
++            raise ReceiptInvalid("transaction message type mismatch")
++        transaction = result.get("transaction") or {}
++        if (transaction.get("networkID", transaction.get("networkId")) != self.network_id or
++                transaction.get("chainID", transaction.get("chainId")) != self.chain_id):
++            raise ReceiptInvalid("transaction network mismatch")
++        height = result.get("height")
++        if not isinstance(height, int) or height <= 0:
++            raise ReceiptInvalid("transaction height is invalid")
++        chain_height = self.height()
++        confirmations = chain_height - height + 1
++        if confirmations < self.finality_confirmations:
++            raise ReceiptPending("transaction has insufficient confirmations")
++
++        payload = transaction.get("msg") or {}
++        if isinstance(payload, dict) and len(payload) == 1:
++            nested = next(iter(payload.values()))
++            if isinstance(nested, dict):
++                payload = nested
++        for field, expected in (expected_fields or {}).items():
++            actual = payload.get(field)
++            if isinstance(expected, str) and isinstance(actual, str):
++                matches = actual.removeprefix("0x").lower() == expected.removeprefix("0x").lower()
++            else:
++                matches = actual == expected
++            if not matches:
++                raise ReceiptInvalid(f"transaction field mismatch: {field}")
++        return {**result, "confirmations": confirmations}
 diff --git a/gameserver/db.py b/gameserver/db.py
-index 95a5723..b709b12 100644
+index 95a5723..fe91c84 100644
 --- a/gameserver/db.py
 +++ b/gameserver/db.py
 @@ -17,6 +17,8 @@ import json
@@ -429,15 +1251,66 @@ index 95a5723..b709b12 100644
  from typing import Dict, List, Optional
  
  DB_PATH = os.environ.get("CASINO_DB_PATH", "/app/data/canasino.db")
-@@ -121,21 +123,60 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
+@@ -121,21 +123,292 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
      actions TEXT NOT NULL DEFAULT '[]',
      created_at INTEGER
  );
++CREATE TABLE IF NOT EXISTS auth_challenges (
++    challenge_id TEXT PRIMARY KEY,
++    address TEXT NOT NULL,
++    action TEXT NOT NULL,
++    resource TEXT NOT NULL,
++    payload_hash TEXT NOT NULL,
++    message TEXT NOT NULL,
++    issued_at INTEGER NOT NULL,
++    expires_at INTEGER NOT NULL,
++    used_at INTEGER
++);
++CREATE TABLE IF NOT EXISTS wallet_grants (
++    token_hash TEXT PRIMARY KEY,
++    address TEXT NOT NULL,
++    action TEXT NOT NULL,
++    resource TEXT NOT NULL,
++    payload_hash TEXT NOT NULL,
++    issued_at INTEGER NOT NULL,
++    expires_at INTEGER NOT NULL,
++    used_at INTEGER
++);
++CREATE TABLE IF NOT EXISTS operations (
++    operation_id TEXT PRIMARY KEY,
++    address TEXT NOT NULL,
++    action TEXT NOT NULL,
++    resource TEXT NOT NULL,
++    payload_hash TEXT NOT NULL,
++    tx_hash TEXT NOT NULL UNIQUE,
++    state TEXT NOT NULL,
++    receipt_height INTEGER,
++    error_code TEXT,
++    error_detail TEXT,
++    created_at INTEGER NOT NULL,
++    updated_at INTEGER NOT NULL
++);
++CREATE TABLE IF NOT EXISTS chain_outbox (
++    operation_id TEXT PRIMARY KEY,
++    sender TEXT NOT NULL,
++    message_type TEXT NOT NULL,
++    payload_hash TEXT NOT NULL,
++    tx_json TEXT NOT NULL,
++    tx_hash TEXT NOT NULL UNIQUE,
++    state TEXT NOT NULL,
++    receipt_height INTEGER,
++    created_at INTEGER NOT NULL,
++    updated_at INTEGER NOT NULL
++);
 +CREATE INDEX IF NOT EXISTS rounds_settled_at ON rounds(settled_at);
 +CREATE INDEX IF NOT EXISTS roulette_settled_at ON roulette_rounds(settled_at);
 +CREATE INDEX IF NOT EXISTS domino_settled_at ON domino_rounds(settled_at);
 +CREATE INDEX IF NOT EXISTS poker_settled_at ON poker_rounds(settled_at);
 +CREATE INDEX IF NOT EXISTS stats_total_won ON player_stats(total_won DESC);
++CREATE INDEX IF NOT EXISTS auth_challenges_address_time ON auth_challenges(address, issued_at);
++CREATE INDEX IF NOT EXISTS wallet_grants_expiry ON wallet_grants(expires_at);
++CREATE INDEX IF NOT EXISTS operations_state_time ON operations(state, updated_at);
++CREATE INDEX IF NOT EXISTS chain_outbox_state_time ON chain_outbox(state, updated_at);
  """
  
  _PERIOD_SECONDS = {"daily": 86_400, "weekly": 7 * 86_400, "monthly": 30 * 86_400}
@@ -489,10 +1362,191 @@ index 95a5723..b709b12 100644
 +        with self._lock:
 +            self._conn.close()
 +
++    # -- one-use wallet transaction authorization --------------------------
++
++    def count_recent_auth_challenges(self, address: str, since: int) -> int:
++        row = self._conn.execute(
++            "SELECT COUNT(*) FROM auth_challenges WHERE address = ? AND issued_at >= ? AND used_at IS NULL",
++            (address, since),
++        ).fetchone()
++        return int(row[0])
++
++    def create_auth_challenge(self, challenge_id: str, address: str, action: str,
++                              resource: str, payload_hash: str, message: str,
++                              issued_at: int, expires_at: int) -> None:
++        self._conn.execute(
++            "INSERT INTO auth_challenges "
++            "(challenge_id,address,action,resource,payload_hash,message,issued_at,expires_at) "
++            "VALUES (?,?,?,?,?,?,?,?)",
++            (challenge_id, address, action, resource, payload_hash, message, issued_at, expires_at),
++        )
++
++    def get_auth_challenge(self, challenge_id: str) -> Optional[dict]:
++        row = self._conn.execute(
++            "SELECT address,action,resource,payload_hash,message,issued_at,expires_at,used_at "
++            "FROM auth_challenges WHERE challenge_id = ?", (challenge_id,),
++        ).fetchone()
++        if not row:
++            return None
++        fields = ("address", "action", "resource", "payload_hash", "message",
++                  "issued_at", "expires_at", "used_at")
++        return dict(zip(fields, row))
++
++    def consume_auth_challenge(self, challenge_id: str, now: int) -> bool:
++        result = self._conn.execute(
++            "UPDATE auth_challenges SET used_at = ? "
++            "WHERE challenge_id = ? AND used_at IS NULL AND expires_at >= ?",
++            (now, challenge_id, now),
++        )
++        return result.rowcount == 1
++
++    def create_wallet_grant(self, token_hash: str, address: str, action: str,
++                            resource: str, payload_hash: str, issued_at: int,
++                            expires_at: int) -> None:
++        self._conn.execute(
++            "INSERT INTO wallet_grants "
++            "(token_hash,address,action,resource,payload_hash,issued_at,expires_at) "
++            "VALUES (?,?,?,?,?,?,?)",
++            (token_hash, address, action, resource, payload_hash, issued_at, expires_at),
++        )
++
++    def consume_wallet_grant(self, token_hash: str, address: str, action: str,
++                             resource: str, payload_hash: str, now: int) -> bool:
++        result = self._conn.execute(
++            "UPDATE wallet_grants SET used_at = ? WHERE token_hash = ? AND address = ? "
++            "AND action = ? AND resource = ? AND payload_hash = ? "
++            "AND used_at IS NULL AND expires_at >= ?",
++            (now, token_hash, address, action, resource, payload_hash, now),
++        )
++        return result.rowcount == 1
++
++    def authorize_operation(self, token_hash: str, operation_id: str, address: str,
++                            action: str, resource: str, payload_hash: str,
++                            tx_hash: str, now: int) -> Optional[dict]:
++        """Atomically consume a grant and create its durable operation.
++
++        An exact retry returns the existing operation without consuming another
++        grant. Reusing an operation id for different content is always rejected.
++        """
++        existing = self.get_operation(operation_id)
++        expected = (address, action, resource, payload_hash, tx_hash)
++        if existing:
++            actual = tuple(existing[key] for key in
++                           ("address", "action", "resource", "payload_hash", "tx_hash"))
++            if actual != expected:
++                raise ValueError("operation id already belongs to different content")
++            return existing
++        tx_owner = self._conn.execute(
++            "SELECT operation_id FROM operations WHERE tx_hash = ?", (tx_hash,),
++        ).fetchone()
++        if tx_owner:
++            raise ValueError("transaction hash already belongs to another operation")
++        consumed = self._conn.execute(
++            "UPDATE wallet_grants SET used_at = ? WHERE token_hash = ? AND address = ? "
++            "AND action = ? AND resource = ? AND payload_hash = ? "
++            "AND used_at IS NULL AND expires_at >= ?",
++            (now, token_hash, address, action, resource, payload_hash, now),
++        )
++        if consumed.rowcount != 1:
++            return None
++        self._conn.execute(
++            "INSERT INTO operations "
++            "(operation_id,address,action,resource,payload_hash,tx_hash,state,created_at,updated_at) "
++            "VALUES (?,?,?,?,?,?,'AUTHORIZED',?,?)",
++            (operation_id, address, action, resource, payload_hash, tx_hash, now, now),
++        )
++        return self.get_operation(operation_id)
++
++    def get_operation(self, operation_id: str) -> Optional[dict]:
++        row = self._conn.execute(
++            "SELECT operation_id,address,action,resource,payload_hash,tx_hash,state,"
++            "receipt_height,error_code,error_detail,created_at,updated_at "
++            "FROM operations WHERE operation_id = ?", (operation_id,),
++        ).fetchone()
++        if not row:
++            return None
++        fields = ("operation_id", "address", "action", "resource", "payload_hash", "tx_hash",
++                  "state", "receipt_height", "error_code", "error_detail", "created_at", "updated_at")
++        return dict(zip(fields, row))
++
++    def transition_operation(self, operation_id: str, expected_state: str, new_state: str,
++                             now: int, receipt_height: Optional[int] = None,
++                             error_code: Optional[str] = None,
++                             error_detail: Optional[str] = None) -> bool:
++        allowed = {
++            ("AUTHORIZED", "PENDING"), ("AUTHORIZED", "FINALIZED"),
++            ("PENDING", "PENDING"), ("PENDING", "FINALIZED"),
++            ("AUTHORIZED", "REJECTED"), ("PENDING", "REJECTED"),
++            ("FINALIZED", "APPLIED"),
++        }
++        if (expected_state, new_state) not in allowed:
++            raise ValueError("invalid operation state transition")
++        result = self._conn.execute(
++            "UPDATE operations SET state=?,receipt_height=?,error_code=?,error_detail=?,updated_at=? "
++            "WHERE operation_id=? AND state=?",
++            (new_state, receipt_height, error_code, error_detail, now, operation_id, expected_state),
++        )
++        return result.rowcount == 1
++
++    def reconcilable_operations(self, limit: int = 100) -> List[dict]:
++        rows = self._conn.execute(
++            "SELECT operation_id FROM operations WHERE state IN ('AUTHORIZED','PENDING','FINALIZED') "
++            "ORDER BY updated_at ASC LIMIT ?", (limit,),
++        ).fetchall()
++        return [self.get_operation(row[0]) for row in rows]
++
++    # -- persist-before-submit operator transaction outbox -----------------
++
++    def prepare_chain_submission(self, operation_id: str, sender: str, message_type: str,
++                                 payload_hash: str, tx_json: str, tx_hash: str,
++                                 now: int) -> dict:
++        existing = self.get_chain_submission(operation_id)
++        if existing:
++            expected = (sender, message_type, payload_hash)
++            actual = tuple(existing[key] for key in ("sender", "message_type", "payload_hash"))
++            if actual != expected:
++                raise ValueError("chain operation id already belongs to different content")
++            return existing
++        self._conn.execute(
++            "INSERT INTO chain_outbox "
++            "(operation_id,sender,message_type,payload_hash,tx_json,tx_hash,state,created_at,updated_at) "
++            "VALUES (?,?,?,?,?,?,'PREPARED',?,?)",
++            (operation_id, sender, message_type, payload_hash, tx_json, tx_hash, now, now),
++        )
++        return self.get_chain_submission(operation_id)
++
++    def get_chain_submission(self, operation_id: str) -> Optional[dict]:
++        row = self._conn.execute(
++            "SELECT operation_id,sender,message_type,payload_hash,tx_json,tx_hash,state,"
++            "receipt_height,created_at,updated_at FROM chain_outbox WHERE operation_id=?",
++            (operation_id,),
++        ).fetchone()
++        if not row:
++            return None
++        fields = ("operation_id", "sender", "message_type", "payload_hash", "tx_json", "tx_hash",
++                  "state", "receipt_height", "created_at", "updated_at")
++        return dict(zip(fields, row))
++
++    def mark_chain_submission(self, operation_id: str, state: str, now: int,
++                              receipt_height: Optional[int] = None) -> None:
++        if state not in ("SUBMITTED", "FINALIZED"):
++            raise ValueError("invalid chain outbox state")
++        self._conn.execute(
++            "UPDATE chain_outbox SET state=?,receipt_height=?,updated_at=? WHERE operation_id=?",
++            (state, receipt_height, now, operation_id),
++        )
++
++    def pending_chain_submissions(self, limit: int = 100) -> List[dict]:
++        rows = self._conn.execute(
++            "SELECT operation_id FROM chain_outbox WHERE state!='FINALIZED' ORDER BY updated_at LIMIT ?",
++            (limit,),
++        ).fetchall()
++        return [self.get_chain_submission(row[0]) for row in rows]
++
      # -- round history / stats (written once, at settle) ---------------------
  
      def record_settle(self, round_id_hex: str, room: str, entry_fee: int, rake_bps: int,
-@@ -146,20 +187,15 @@ class Store:
+@@ -146,20 +419,15 @@ class Store:
          Idempotent: a retried/duplicate settle call for the same round_id_hex
          (e.g. a client reconnect replaying the WS flow after a restart) must
          not double-count player_stats — the chain only ever pays out once."""
@@ -516,7 +1570,7 @@ index 95a5723..b709b12 100644
              return
  
          winner_set = set(winners)
-@@ -217,12 +253,19 @@ class Store:
+@@ -217,12 +485,19 @@ class Store:
                      for a, g, w, t in cur.fetchall()]
          since = int(time.time()) - window
          cur = self._conn.execute(
@@ -539,7 +1593,7 @@ index 95a5723..b709b12 100644
                  s = agg.setdefault(addr, {"address": addr, "gamesPlayed": 0, "wins": 0, "totalWon": 0})
                  s["gamesPlayed"] += 1
                  s["wins"] += 1 if addr in winners else 0
-@@ -296,19 +339,14 @@ class Store:
+@@ -296,19 +571,14 @@ class Store:
          for the same round_id_hex must not double-count player_stats. Shares
          the player_stats table with Bingo — a player's win rate/total won is
          tracked across every game, not siloed per game."""
@@ -562,7 +1616,7 @@ index 95a5723..b709b12 100644
              return
  
          for addr, delta in payouts.items():
-@@ -384,20 +422,15 @@ class Store:
+@@ -384,20 +654,15 @@ class Store:
                                tx_hash: str) -> None:
          """Same idempotency guarantee as record_settle/record_roulette_settle.
          Shares player_stats with every other game."""
@@ -586,7 +1640,7 @@ index 95a5723..b709b12 100644
              return
  
          winner_set = set(winners)
-@@ -487,21 +520,16 @@ class Store:
+@@ -487,21 +752,16 @@ class Store:
                               tx_hash: str) -> None:
          """Same idempotency guarantee as record_settle/record_domino_settle.
          Shares player_stats with every other game."""
@@ -612,7 +1666,7 @@ index 95a5723..b709b12 100644
  
          winner_set = set(winners)
 diff --git a/gameserver/domino_rooms.py b/gameserver/domino_rooms.py
-index 2895d4e..a2931db 100644
+index 2895d4e..cdcf7ef 100644
 --- a/gameserver/domino_rooms.py
 +++ b/gameserver/domino_rooms.py
 @@ -15,6 +15,7 @@ gameserver (e.g. Bingo's card reveal) -- not a new gap introduced here.
@@ -640,7 +1694,7 @@ index 2895d4e..a2931db 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -109,6 +113,7 @@ class DominoManager:
+@@ -109,17 +113,20 @@ class DominoManager:
              rnd.result = engine.result
          return engine
  
@@ -648,7 +1702,13 @@ index 2895d4e..a2931db 100644
      def open_round(self, entry_fee: int, rake_bps: int) -> DominoRound:
          seed = secrets.token_bytes(32)
          round_id = secrets.token_bytes(8)
-@@ -120,6 +125,7 @@ class DominoManager:
+         commit = commitment(seed)
+-        self.bridge.open_domino(self.operator, round_id, commit, entry_fee, rake_bps)
++        self.bridge.open_domino(self.operator, round_id, commit, entry_fee, rake_bps,
++                                operation_id=f"domino:open:{round_id.hex()}")
+         rnd = DominoRound(round_id, seed, commit, entry_fee, rake_bps)
+         self.rounds[rnd.id_hex] = rnd
+         if self.store is not None:
              self.store.save_domino_open_round(rnd.id_hex, seed.hex(), commit.hex(), entry_fee, rake_bps)
          return rnd
  
@@ -656,7 +1716,19 @@ index 2895d4e..a2931db 100644
      def join(self, round_id_hex: str, nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
-@@ -135,8 +141,13 @@ class DominoManager:
+@@ -127,16 +134,23 @@ class DominoManager:
+         if len(rnd.participants) >= edomino.NUM_PLAYERS:
+             raise ValueError("round already has enough players")
+         key = self.bridge.new_key(nickname or f"dplayer_{secrets.token_hex(3)}")
+-        self.bridge.buy_coins(self.operator, key.address, rnd.entry_fee)
+-        self.bridge.join_domino(key, rnd.round_id, rnd.entry_fee)
++        self.bridge.buy_coins(self.operator, key.address, rnd.entry_fee,
++                              operation_id=f"domino:fund:{rnd.id_hex}:{key.address}")
++        self.bridge.join_domino(key, rnd.round_id, rnd.entry_fee,
++                                operation_id=f"domino:join:{rnd.id_hex}:{key.address}")
+         rnd.participants[key.address] = Participant(key)
+         self._persist_participants(rnd)
+         if len(rnd.participants) == edomino.NUM_PLAYERS:
              self._rebuild_engine(rnd)
          return key.address
  
@@ -670,7 +1742,7 @@ index 2895d4e..a2931db 100644
          if len(rnd.participants) >= edomino.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -153,6 +164,7 @@ class DominoManager:
+@@ -153,6 +167,7 @@ class DominoManager:
      def player_index(self, rnd: DominoRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
@@ -678,7 +1750,7 @@ index 2895d4e..a2931db 100644
      def apply_move(self, round_id_hex: str, address: str, action: str,
                      tile: Optional[Tuple[int, int]] = None, end: Optional[str] = None):
          """Validates and applies one move. Raises engine.domino.IllegalMove on
-@@ -192,6 +204,7 @@ class DominoManager:
+@@ -192,6 +207,7 @@ class DominoManager:
          return sum(rnd.entry_fee for rnd in self.rounds.values()
                     if rnd.status == "open" and addr in rnd.participants)
  
@@ -686,8 +1758,20 @@ index 2895d4e..a2931db 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          engine = self.engines[round_id_hex]
+@@ -201,7 +217,10 @@ class DominoManager:
+         before = {a: self.bridge.account_balance(a) for a in order}
+         proto_moves = [(m["action"], (m["tile"] or [0, 0])[0], (m["tile"] or [0, 0])[1], m.get("end") or "")
+                        for m in rnd.moves]
+-        tx_hash = self.bridge.settle_domino(self.operator, rnd.round_id, rnd.seed, proto_moves)
++        tx_hash = self.bridge.settle_domino(
++            self.operator, rnd.round_id, rnd.seed, proto_moves,
++            operation_id=f"domino:settle:{rnd.id_hex}",
++        )
+         after = {a: self.bridge.account_balance(a) for a in order}
+         rnd.status = "settled"
+         rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/poker_rooms.py b/gameserver/poker_rooms.py
-index 4014299..58ddbe8 100644
+index 4014299..781cc1a 100644
 --- a/gameserver/poker_rooms.py
 +++ b/gameserver/poker_rooms.py
 @@ -16,6 +16,7 @@ a new gap introduced here.
@@ -715,7 +1799,7 @@ index 4014299..58ddbe8 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -113,6 +117,7 @@ class PokerManager:
+@@ -113,11 +117,15 @@ class PokerManager:
              rnd.result = engine.result
          return engine
  
@@ -723,7 +1807,16 @@ index 4014299..58ddbe8 100644
      def open_round(self, small_blind: int, big_blind: int, buy_in: int, rake_bps: int) -> PokerRound:
          seed = secrets.token_bytes(32)
          round_id = secrets.token_bytes(8)
-@@ -125,6 +130,7 @@ class PokerManager:
+         commit = commitment(seed)
+-        self.bridge.open_poker(self.operator, round_id, commit, small_blind, big_blind, buy_in, rake_bps)
++        self.bridge.open_poker(
++            self.operator, round_id, commit, small_blind, big_blind, buy_in, rake_bps,
++            operation_id=f"poker:open:{round_id.hex()}",
++        )
+         rnd = PokerRound(round_id, seed, commit, small_blind, big_blind, buy_in, rake_bps)
+         self.rounds[rnd.id_hex] = rnd
+         if self.store is not None:
+@@ -125,6 +133,7 @@ class PokerManager:
                                                small_blind, big_blind, buy_in, rake_bps)
          return rnd
  
@@ -731,7 +1824,19 @@ index 4014299..58ddbe8 100644
      def join(self, round_id_hex: str, nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
-@@ -140,8 +146,13 @@ class PokerManager:
+@@ -132,16 +141,23 @@ class PokerManager:
+         if len(rnd.participants) >= epoker.NUM_PLAYERS:
+             raise ValueError("round already has enough players")
+         key = self.bridge.new_key(nickname or f"pplayer_{secrets.token_hex(3)}")
+-        self.bridge.buy_coins(self.operator, key.address, rnd.buy_in)
+-        self.bridge.join_poker(key, rnd.round_id, rnd.buy_in)
++        self.bridge.buy_coins(self.operator, key.address, rnd.buy_in,
++                              operation_id=f"poker:fund:{rnd.id_hex}:{key.address}")
++        self.bridge.join_poker(key, rnd.round_id, rnd.buy_in,
++                               operation_id=f"poker:join:{rnd.id_hex}:{key.address}")
+         rnd.participants[key.address] = Participant(key)
+         self._persist_participants(rnd)
+         if len(rnd.participants) == epoker.NUM_PLAYERS:
              self._rebuild_engine(rnd)
          return key.address
  
@@ -745,7 +1850,7 @@ index 4014299..58ddbe8 100644
          if len(rnd.participants) >= epoker.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -158,6 +169,7 @@ class PokerManager:
+@@ -158,6 +174,7 @@ class PokerManager:
      def player_index(self, rnd: PokerRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
@@ -753,7 +1858,7 @@ index 4014299..58ddbe8 100644
      def apply_action(self, round_id_hex: str, address: str, action: str, amount: int = 0):
          """Validates and applies one betting action. Raises engine.poker.IllegalMove
          on an illegal action, or ValueError if the round/turn state doesn't
-@@ -198,6 +210,7 @@ class PokerManager:
+@@ -198,6 +215,7 @@ class PokerManager:
          return sum(rnd.buy_in for rnd in self.rounds.values()
                     if rnd.status == "open" and addr in rnd.participants)
  
@@ -761,8 +1866,20 @@ index 4014299..58ddbe8 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          engine = self.engines[round_id_hex]
+@@ -206,7 +224,10 @@ class PokerManager:
+         order = rnd.player_order
+         before = {a: self.bridge.account_balance(a) for a in order}
+         proto_actions = [(a["action"], a["amount"]) for a in rnd.actions]
+-        tx_hash = self.bridge.settle_poker(self.operator, rnd.round_id, rnd.seed, proto_actions)
++        tx_hash = self.bridge.settle_poker(
++            self.operator, rnd.round_id, rnd.seed, proto_actions,
++            operation_id=f"poker:settle:{rnd.id_hex}",
++        )
+         after = {a: self.bridge.account_balance(a) for a in order}
+         rnd.status = "settled"
+         rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/rooms.py b/gameserver/rooms.py
-index 12b56c4..978e947 100644
+index 12b56c4..a33af43 100644
 --- a/gameserver/rooms.py
 +++ b/gameserver/rooms.py
 @@ -15,6 +15,7 @@ operator/player keys needed to sign a settle for that round.
@@ -790,7 +1907,7 @@ index 12b56c4..978e947 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -93,6 +97,7 @@ class RoomManager:
+@@ -93,13 +97,14 @@ class RoomManager:
              )
              self.rounds[rnd.id_hex] = rnd
  
@@ -798,7 +1915,15 @@ index 12b56c4..978e947 100644
      def create_round(self, entry_fee: int = 100_000_000, rake_bps: int = 1_000,
                       payout_weights_bps=(10_000,), room: str = "") -> Round:
          seed = secrets.token_bytes(32)
-@@ -108,7 +113,9 @@ class RoomManager:
+         round_id = secrets.token_bytes(8)
+         commit = commitment(seed)
+         self.bridge.open_room(self.operator, round_id, commit, entry_fee, rake_bps,
+-                              list(payout_weights_bps))
++                              list(payout_weights_bps), operation_id=f"bingo:open:{round_id.hex()}")
+         rnd = Round(round_id, seed, commit, entry_fee, rake_bps, list(payout_weights_bps),
+                     order=edraw.draw_order(seed), room=room)
+         self.rounds[rnd.id_hex] = rnd
+@@ -108,24 +113,37 @@ class RoomManager:
                                         list(payout_weights_bps), room, rnd.order)
          return rnd
  
@@ -808,7 +1933,16 @@ index 12b56c4..978e947 100644
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
              raise ValueError("round not open")
-@@ -121,11 +128,20 @@ class RoomManager:
+         key = self.bridge.new_key(nickname or f"player_{secrets.token_hex(3)}")
+         cost = rnd.entry_fee * econ.CARD_COST_MULTIPLIER_BPS[num_cards] // 10_000
+         # server provisions the entry (mint) then escrows it via join
+-        self.bridge.buy_coins(self.operator, key.address, cost)
+-        self.bridge.join_room(key, rnd.round_id, num_cards, cost)
++        self.bridge.buy_coins(self.operator, key.address, cost,
++                              operation_id=f"bingo:fund:{rnd.id_hex}:{key.address}")
++        self.bridge.join_room(key, rnd.round_id, num_cards, cost,
++                              operation_id=f"bingo:join:{rnd.id_hex}:{key.address}")
+         rnd.participants[key.address] = Participant(key, num_cards)
          self._persist_participants(rnd)
          return key.address
  
@@ -829,7 +1963,7 @@ index 12b56c4..978e947 100644
          rnd.participants[address.lower()] = Participant(key=None, num_cards=num_cards)
          self._persist_participants(rnd)
          return address.lower()
-@@ -172,7 +188,10 @@ class RoomManager:
+@@ -172,10 +190,16 @@ class RoomManager:
                  out.append(addr)
          return out
  
@@ -839,9 +1973,16 @@ index 12b56c4..978e947 100644
 +            raise ValueError("round pattern is fixed to line")
          rnd = self.rounds[round_id_hex]
          before = {a: self.bridge.account_balance(a) for a in rnd.participants}
-         tx_hash = self.bridge.settle_room(self.operator, rnd.round_id, rnd.seed, pattern)
+-        tx_hash = self.bridge.settle_room(self.operator, rnd.round_id, rnd.seed, pattern)
++        tx_hash = self.bridge.settle_room(
++            self.operator, rnd.round_id, rnd.seed, pattern,
++            operation_id=f"bingo:settle:{rnd.id_hex}",
++        )
+         after = {a: self.bridge.account_balance(a) for a in rnd.participants}
+         rnd.status = "settled"
+         rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/roulette_rooms.py b/gameserver/roulette_rooms.py
-index d44c9d7..5ef4c38 100644
+index d44c9d7..7233291 100644
 --- a/gameserver/roulette_rooms.py
 +++ b/gameserver/roulette_rooms.py
 @@ -16,6 +16,7 @@ escrowed bets with no key left able to sign the settle.
@@ -869,7 +2010,7 @@ index d44c9d7..5ef4c38 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -91,6 +95,7 @@ class RouletteManager:
+@@ -91,17 +95,20 @@ class RouletteManager:
              )
              self.rounds[rnd.id_hex] = rnd
  
@@ -877,7 +2018,13 @@ index d44c9d7..5ef4c38 100644
      def open_round(self, rake_bps: int) -> RouletteRound:
          seed = secrets.token_bytes(32)
          round_id = secrets.token_bytes(8)
-@@ -102,6 +107,7 @@ class RouletteManager:
+         commit = commitment(seed)
+-        self.bridge.open_roulette(self.operator, round_id, commit, rake_bps)
++        self.bridge.open_roulette(self.operator, round_id, commit, rake_bps,
++                                  operation_id=f"roulette:open:{round_id.hex()}")
+         rnd = RouletteRound(round_id, seed, commit, rake_bps, opened_at=time.time())
+         self.rounds[rnd.id_hex] = rnd
+         if self.store is not None:
              self.store.save_roulette_open_round(rnd.id_hex, seed.hex(), commit.hex(), rake_bps)
          return rnd
  
@@ -885,7 +2032,17 @@ index d44c9d7..5ef4c38 100644
      def place_bet(self, round_id_hex: str, bet_type: str, bet_number: int, amount: int,
                    nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
-@@ -115,6 +121,7 @@ class RouletteManager:
+@@ -109,12 +116,15 @@ class RouletteManager:
+             raise ValueError("round not open")
+         key = self.bridge.new_key(nickname or f"bettor_{secrets.token_hex(3)}")
+         # server provisions the stake (mint) then escrows it via roulette_bet
+-        self.bridge.buy_coins(self.operator, key.address, amount)
+-        self.bridge.roulette_bet(key, rnd.round_id, bet_type, bet_number, amount)
++        self.bridge.buy_coins(self.operator, key.address, amount,
++                              operation_id=f"roulette:fund:{rnd.id_hex}:{key.address}")
++        self.bridge.roulette_bet(key, rnd.round_id, bet_type, bet_number, amount,
++                                 operation_id=f"roulette:bet:{rnd.id_hex}:{key.address}")
+         rnd.bets[key.address] = Bet(key, bet_type, bet_number, amount)
          self._persist_bets(rnd)
          return key.address
  
@@ -893,7 +2050,7 @@ index d44c9d7..5ef4c38 100644
      def register_external_bet(self, round_id_hex: str, address: str, bet_type: str,
                                bet_number: int, amount: int) -> str:
          """Record a bettor who bet on-chain from their OWN wallet. The server
-@@ -122,6 +129,13 @@ class RouletteManager:
+@@ -122,6 +132,13 @@ class RouletteManager:
          chain itself pays from its own bet records, so this is bookkeeping
          only (needed to report this address's delta after settle)."""
          rnd = self.rounds[round_id_hex]
@@ -907,7 +2064,7 @@ index d44c9d7..5ef4c38 100644
          rnd.bets[address.lower()] = Bet(key=None, bet_type=bet_type, bet_number=bet_number, amount=amount)
          self._persist_bets(rnd)
          return address.lower()
-@@ -144,6 +158,7 @@ class RouletteManager:
+@@ -144,10 +161,14 @@ class RouletteManager:
                  total += b.amount
          return total
  
@@ -915,12 +2072,20 @@ index d44c9d7..5ef4c38 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          before = {a: self.bridge.account_balance(a) for a in rnd.bets}
+-        tx_hash = self.bridge.settle_roulette(self.operator, rnd.round_id, rnd.seed)
++        tx_hash = self.bridge.settle_roulette(
++            self.operator, rnd.round_id, rnd.seed,
++            operation_id=f"roulette:settle:{rnd.id_hex}",
++        )
+         after = {a: self.bridge.account_balance(a) for a in rnd.bets}
+         rnd.status = "settled"
+         rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/security.py b/gameserver/security.py
 new file mode 100644
-index 0000000..29dab00
+index 0000000..0734cd8
 --- /dev/null
 +++ b/gameserver/security.py
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,101 @@
 +"""Fail-closed transport policy until wallet-bound authentication is implemented.
 +
 +An address is public information, not proof of ownership. The operator bearer
@@ -928,12 +2093,22 @@ index 0000000..29dab00
 +"""
 +
 +import asyncio
++import re
 +import secrets
 +
 +from starlette.datastructures import Headers
 +from starlette.responses import JSONResponse
 +
 +MAX_BODY_BYTES = 16_384
++PUBLIC_POST_PATHS = frozenset({"/auth/challenges", "/auth/verify"})
++WALLET_POST_PATHS = (
++    re.compile(r"^/rounds/[0-9a-fA-F]{16}/register$"),
++    re.compile(r"^/(?:roulette|domino|poker)/rounds/[0-9a-fA-F]{16}/register$"),
++)
++
++
++def _wallet_route(path: str) -> bool:
++    return any(pattern.fullmatch(path) for pattern in WALLET_POST_PATHS)
 +
 +
 +class OperatorBoundary:
@@ -950,13 +2125,20 @@ index 0000000..29dab00
 +        # All current sockets either drive settlement or expose live game state.
 +        # Keep them operator-only until player sessions and bounded subscriptions
 +        # exist; never put this bearer credential into a URL.
-+        private = websocket or scope["method"] not in ("GET", "HEAD", "OPTIONS") or (
++        public_auth = not websocket and scope["path"] in PUBLIC_POST_PATHS
++        private = websocket or (scope["method"] not in ("GET", "HEAD", "OPTIONS") and not public_auth) or (
 +            scope["path"].rstrip("/").endswith(("/hand", "/card"))
 +        )
 +        authorization = headers.getlist("authorization")
-+        authenticated = len(authorization) == 1 and secrets.compare_digest(
++        operator_authenticated = len(authorization) == 1 and secrets.compare_digest(
 +            authorization[0].encode(), self.expected
 +        )
++        wallet_authenticated = (
++            not websocket and scope["method"] == "POST" and _wallet_route(scope["path"])
++            and len(authorization) == 1 and authorization[0].startswith("Canasino-Wallet ")
++            and len(authorization[0]) > len("Canasino-Wallet ")
++        )
++        authenticated = operator_authenticated or wallet_authenticated
 +        if websocket:
 +            origin = headers.get("origin")
 +            if not authenticated or (origin is not None and origin not in self.origins):
@@ -1064,12 +2246,87 @@ index d4afe85..e604548 100755
  ROOT=/home/ubuntu/canasino
  OUT="$ROOT/backups"
  STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+diff --git a/tests/fakes.py b/tests/fakes.py
+index 167e85e..092efc3 100644
+--- a/tests/fakes.py
++++ b/tests/fakes.py
+@@ -22,57 +22,57 @@ class FakeBridge:
+         # callers like cards_for() do bytes.fromhex(addr).
+         return Key(address=f"{n:040x}", public_key=f"{n:096x}", private_key=f"{n:064x}")
+ 
+-    def open_room(self, operator, round_id, commitment, entry_fee, rake_bps, payout_weights_bps):
++    def open_room(self, operator, round_id, commitment, entry_fee, rake_bps, payout_weights_bps, operation_id=None):
+         return "0xopen"
+ 
+-    def buy_coins(self, admin, recipient, amount):
++    def buy_coins(self, admin, recipient, amount, operation_id=None):
+         self.balances[recipient] = self.balances.get(recipient, 0) + amount
+         return "0xbuy"
+ 
+     def buy_gems(self, admin, recipient, amount):
+         return "0xgems"
+ 
+-    def join_room(self, player, round_id, num_cards, amount):
++    def join_room(self, player, round_id, num_cards, amount, operation_id=None):
+         self.balances[player.address] = self.balances.get(player.address, 0) - amount
+         return "0xjoin"
+ 
+-    def settle_room(self, operator, round_id, seed, pattern="line"):
++    def settle_room(self, operator, round_id, seed, pattern="line", operation_id=None):
+         return "0xsettle"
+ 
+-    def open_roulette(self, operator, round_id, commitment, rake_bps):
++    def open_roulette(self, operator, round_id, commitment, rake_bps, operation_id=None):
+         return "0xopenroulette"
+ 
+-    def roulette_bet(self, player, round_id, bet_type, bet_number, amount):
++    def roulette_bet(self, player, round_id, bet_type, bet_number, amount, operation_id=None):
+         self.balances[player.address] = self.balances.get(player.address, 0) - amount
+         return "0xbet"
+ 
+-    def settle_roulette(self, operator, round_id, seed):
++    def settle_roulette(self, operator, round_id, seed, operation_id=None):
+         return "0xsettleroulette"
+ 
+     def expire_roulette(self, caller, round_id):
+         return "0xexpireroulette"
+ 
+-    def open_domino(self, operator, round_id, commitment, entry_fee, rake_bps):
++    def open_domino(self, operator, round_id, commitment, entry_fee, rake_bps, operation_id=None):
+         return "0xopendomino"
+ 
+-    def join_domino(self, player, round_id, amount):
++    def join_domino(self, player, round_id, amount, operation_id=None):
+         self.balances[player.address] = self.balances.get(player.address, 0) - amount
+         return "0xjoindomino"
+ 
+-    def settle_domino(self, operator, round_id, seed, moves):
++    def settle_domino(self, operator, round_id, seed, moves, operation_id=None):
+         return "0xsettledomino"
+ 
+     def expire_domino(self, caller, round_id):
+         return "0xexpiredomino"
+ 
+-    def open_poker(self, operator, round_id, commitment, small_blind, big_blind, buy_in, rake_bps):
++    def open_poker(self, operator, round_id, commitment, small_blind, big_blind, buy_in, rake_bps, operation_id=None):
+         return "0xopenpoker"
+ 
+-    def join_poker(self, player, round_id, amount):
++    def join_poker(self, player, round_id, amount, operation_id=None):
+         self.balances[player.address] = self.balances.get(player.address, 0) - amount
+         return "0xjoinpoker"
+ 
+-    def settle_poker(self, operator, round_id, seed, actions):
++    def settle_poker(self, operator, round_id, seed, actions, operation_id=None):
+         return "0xsettlepoker"
+ 
+     def expire_poker(self, caller, round_id):
 diff --git a/tests/test_audit_security.py b/tests/test_audit_security.py
 new file mode 100644
-index 0000000..3caf480
+index 0000000..408804e
 --- /dev/null
 +++ b/tests/test_audit_security.py
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,76 @@
 +import concurrent.futures
 +import os
 +import unittest
@@ -1098,6 +2355,8 @@ index 0000000..3caf480
 +    def test_every_mutating_endpoint_is_denied_without_operator(self):
 +        for route in self.app.routes:
 +            if 'POST' not in getattr(route, 'methods', set()):
++                continue
++            if route.path in ('/auth/challenges', '/auth/verify'):
 +                continue
 +            path = route.path.replace('{rid}', 'ab'*8).replace('{address}', 'ab'*20)
 +            with self.subTest(path=path):
@@ -1143,6 +2402,179 @@ index 0000000..3caf480
 +        self.assertEqual(self.store.history_for('a'),[])
 +
 +if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_chain_outbox.py b/tests/test_chain_outbox.py
+new file mode 100644
+index 0000000..e14e1dc
+--- /dev/null
++++ b/tests/test_chain_outbox.py
+@@ -0,0 +1,76 @@
++import json
++import unittest
++
++from gameserver.chain import CanopyBridge, Key
++from gameserver.db import Store
++
++
++TX_HASH = "cd" * 32
++SIGNER = Key(address="12" * 20, public_key="34" * 48, private_key="56" * 32)
++
++
++class OutboxBridge(CanopyBridge):
++    def __init__(self, store, fail_submit=False):
++        super().__init__(query_url="http://test")
++        self.store = store
++        self.fail_submit = fail_submit
++        self.built = 0
++        self.posts = []
++
++    def _signed_transaction(self, signer, msg_type, msg_bytes):
++        self.built += 1
++        return {"type": msg_type, "msgBytes": msg_bytes.hex(), "stable": True}, TX_HASH
++
++    def _post(self, url, body):
++        self.posts.append((url, body))
++        if self.fail_submit:
++            raise TimeoutError("response lost after acceptance")
++        return json.dumps(TX_HASH)
++
++    def transaction_receipt(self, tx_hash, *, sender, message_type, expected_fields=None):
++        self.assertions = (tx_hash, sender, message_type)
++        return {"height": 88, "confirmations": 2}
++
++
++class ChainOutboxTests(unittest.TestCase):
++    def setUp(self):
++        self.store = Store(":memory:")
++        self.addCleanup(self.store.close)
++
++    def test_envelope_is_persisted_before_submit_and_reused_after_lost_response(self):
++        first = OutboxBridge(self.store, fail_submit=True)
++        tx_hash = first.submit(SIGNER, "send", b"payload", operation_id="economic-op-1")
++        self.assertEqual(tx_hash, TX_HASH)
++        saved = self.store.get_chain_submission("economic-op-1")
++        self.assertEqual(saved["state"], "SUBMITTED")
++        self.assertEqual(json.loads(saved["tx_json"]), first.posts[0][1])
++
++        restarted = OutboxBridge(self.store)
++        recovered = restarted.submit_and_wait(
++            SIGNER, "send", b"payload", timeout=0.1, operation_id="economic-op-1",
++        )
++        self.assertEqual(recovered, TX_HASH)
++        self.assertEqual(restarted.built, 0, "restart must reuse the exact signed envelope")
++        finalized = self.store.get_chain_submission("economic-op-1")
++        self.assertEqual(finalized["state"], "FINALIZED")
++        self.assertEqual(finalized["receipt_height"], 88)
++
++    def test_operation_id_cannot_be_rebound_to_another_payload(self):
++        bridge = OutboxBridge(self.store)
++        bridge.submit(SIGNER, "send", b"first", operation_id="economic-op-2")
++        with self.assertRaises(ValueError):
++            bridge.submit(SIGNER, "send", b"second", operation_id="economic-op-2")
++
++    def test_finalized_submission_returns_without_network_or_resigning(self):
++        bridge = OutboxBridge(self.store)
++        bridge.submit_and_wait(SIGNER, "send", b"payload", timeout=0.1,
++                               operation_id="economic-op-3")
++        restarted = OutboxBridge(self.store, fail_submit=True)
++        self.assertEqual(restarted.submit(
++            SIGNER, "send", b"payload", operation_id="economic-op-3"), TX_HASH)
++        self.assertEqual(restarted.built, 0)
++        self.assertEqual(restarted.posts, [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_chain_receipts.py b/tests/test_chain_receipts.py
+new file mode 100644
+index 0000000..34b5300
+--- /dev/null
++++ b/tests/test_chain_receipts.py
+@@ -0,0 +1,85 @@
++import json
++import unittest
++
++from gameserver.chain import CanopyBridge, ReceiptInvalid, ReceiptPending
++
++
++TX_HASH = "ab" * 32
++SENDER = "12" * 20
++
++
++class ReceiptBridge(CanopyBridge):
++    def __init__(self, result, chain_height=102, confirmations=2):
++        super().__init__(query_url="http://test", chain_id=406, network_id=1,
++                         finality_confirmations=confirmations)
++        self.result = result
++        self.chain_height = chain_height
++
++    def _post(self, url, body):
++        if url.endswith("/v1/query/tx-by-hash"):
++            if body != {"hash": TX_HASH}:
++                raise AssertionError("receipt lookup must use the exact hash")
++            return json.dumps(self.result)
++        raise AssertionError(url)
++
++    def height(self):
++        return self.chain_height
++
++
++def valid_result():
++    return {
++        "sender": SENDER,
++        "messageType": "join_room",
++        "height": 101,
++        "committed": True,
++        "txHash": TX_HASH,
++        "transaction": {
++            "type": "join_room", "networkID": 1, "chainID": 406,
++            "msg": {"messageJoinRoom": {
++                "playerAddress": SENDER, "roundId": "34" * 8,
++                "numCards": 1, "amount": 100,
++            }},
++        },
++    }
++
++
++class TransactionReceiptTests(unittest.TestCase):
++    def verify(self, result=None, **kwargs):
++        return ReceiptBridge(result or valid_result(), **kwargs).transaction_receipt(
++            TX_HASH, sender=SENDER, message_type="join_room",
++            expected_fields={"playerAddress": SENDER, "roundId": "34" * 8,
++                             "numCards": 1, "amount": 100},
++        )
++
++    def test_exact_committed_receipt_with_finality_is_accepted(self):
++        receipt = self.verify()
++        self.assertEqual(receipt["confirmations"], 2)
++
++    def test_pending_or_insufficient_finality_is_retryable(self):
++        pending = valid_result(); pending["committed"] = False
++        with self.assertRaises(ReceiptPending): self.verify(pending)
++        with self.assertRaises(ReceiptPending): self.verify(chain_height=101)
++
++    def test_signer_type_network_hash_and_payload_must_match(self):
++        mutations = [
++            ("sender", "ff" * 20),
++            ("messageType", "send"),
++            ("txHash", "ff" * 32),
++        ]
++        for field, value in mutations:
++            result = valid_result(); result[field] = value
++            with self.subTest(field=field), self.assertRaises(ReceiptInvalid): self.verify(result)
++        result = valid_result(); result["transaction"]["chainID"] = 1
++        with self.assertRaises(ReceiptInvalid): self.verify(result)
++        result = valid_result(); result["transaction"]["msg"]["messageJoinRoom"]["amount"] = 101
++        with self.assertRaises(ReceiptInvalid): self.verify(result)
++
++    def test_invalid_hash_is_rejected_before_network(self):
++        with self.assertRaises(ReceiptInvalid):
++            ReceiptBridge(valid_result()).transaction_receipt(
++                "bad", sender=SENDER, message_type="join_room",
++            )
++
++
++if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tests/test_gameserver_app.py b/tests/test_gameserver_app.py
 index 39eef5c..7baec90 100644
@@ -1325,3 +2757,369 @@ index d0d9b9e..9140c31 100644
  
      def test_register_also_validates_the_bet(self):
          rid = self.client.post("/roulette/rounds").json()["roundId"]
+diff --git a/tests/test_wallet_auth.py b/tests/test_wallet_auth.py
+new file mode 100644
+index 0000000..fc9339e
+--- /dev/null
++++ b/tests/test_wallet_auth.py
+@@ -0,0 +1,190 @@
++import concurrent.futures
++import hashlib
++import os
++import unittest
++import uuid
++from unittest.mock import patch
++
++from blspy import BasicSchemeMPL
++from fastapi.testclient import TestClient
++
++from gameserver.app import create_app
++from gameserver.auth import AuthError, WalletAuthorizer, payload_hash
++from gameserver.db import Store
++from tests.fakes import FakeBridge
++
++
++class WalletAuthorizationTests(unittest.TestCase):
++    def setUp(self):
++        env = patch.dict(os.environ, {
++            "CASINO_ADMIN_TOKEN": "wallet-auth-test-operator",
++            "CASINO_AUTH_DOMAIN": "test.canasino.invalid",
++        })
++        env.start()
++        self.addCleanup(env.stop)
++        self.store = Store(":memory:")
++        self.bridge = FakeBridge()
++        self.app = create_app(self.bridge, self.store)
++        self.client = TestClient(self.app)
++        self.addCleanup(self.client.close)
++        self.addCleanup(self.store.close)
++        self.sk = BasicSchemeMPL.key_gen(b"wallet-auth-test-seed-material-32")
++        self.public_key = bytes(self.sk.get_g1())
++        self.address = hashlib.sha256(self.public_key).digest()[:20].hex()
++        self.payload = {"amount": 100, "roundId": "ab" * 8}
++
++    def challenge(self, **changes):
++        body = {
++            "address": self.address,
++            "action": "join_room",
++            "resource": f"round:{'ab' * 8}",
++            "payload_hash": payload_hash(self.payload),
++        }
++        body.update(changes)
++        return self.client.post("/auth/challenges", json=body)
++
++    def verify(self, challenge, sk=None):
++        signing_key = sk or self.sk
++        signature = BasicSchemeMPL.sign(signing_key, bytes.fromhex(challenge["messageHex"]))
++        return self.client.post("/auth/verify", json={
++            "challenge_id": challenge["challengeId"],
++            "public_key": bytes(signing_key.get_g1()).hex(),
++            "signature": bytes(signature).hex(),
++        })
++
++    def test_challenge_is_domain_chain_payload_and_address_bound(self):
++        response = self.challenge()
++        self.assertEqual(response.status_code, 200, response.text)
++        challenge = response.json()
++        self.assertEqual(challenge["algorithm"], "BLS12-381-BASIC")
++        self.assertEqual(bytes.fromhex(challenge["messageHex"]).decode(), challenge["message"])
++        self.assertIn('"chainId":406', challenge["message"])
++        self.assertIn('"networkId":1', challenge["message"])
++        self.assertIn('"domain":"test.canasino.invalid"', challenge["message"])
++        self.assertIn(f'"address":"{self.address}"', challenge["message"])
++        self.assertIn(f'"payloadHash":"{payload_hash(self.payload)}"', challenge["message"])
++
++    def test_valid_proof_issues_one_use_payload_scoped_grant(self):
++        challenge = self.challenge().json()
++        verified = self.verify(challenge)
++        self.assertEqual(verified.status_code, 200, verified.text)
++        grant = verified.json()["grant"]
++        authorizer = self.app.state.wallet_authorizer
++        authorizer.consume_grant(
++            grant, address=self.address, action="join_room",
++            resource=f"round:{'ab' * 8}", payload=self.payload,
++        )
++        with self.assertRaises(AuthError):
++            authorizer.consume_grant(
++                grant, address=self.address, action="join_room",
++                resource=f"round:{'ab' * 8}", payload=self.payload,
++            )
++
++    def test_challenge_cannot_be_replayed(self):
++        challenge = self.challenge().json()
++        self.assertEqual(self.verify(challenge).status_code, 200)
++        replay = self.verify(challenge)
++        self.assertEqual(replay.status_code, 401)
++        self.assertEqual(replay.json()["code"], "invalid_wallet_proof")
++
++    def test_concurrent_verification_has_exactly_one_winner(self):
++        challenge = self.challenge().json()
++        signature = bytes(BasicSchemeMPL.sign(self.sk, bytes.fromhex(challenge["messageHex"]))).hex()
++
++        def verify(_):
++            try:
++                return self.app.state.wallet_authorizer.verify_challenge(
++                    challenge_id=challenge["challengeId"], public_key=self.public_key.hex(),
++                    signature=signature,
++                )
++            except AuthError:
++                return None
++
++        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
++            results = list(pool.map(verify, range(16)))
++        self.assertEqual(sum(result is not None for result in results), 1)
++
++    def test_wrong_key_cannot_claim_an_address(self):
++        challenge = self.challenge().json()
++        other = BasicSchemeMPL.key_gen(b"another-wallet-test-seed-value!!")
++        response = self.verify(challenge, other)
++        self.assertEqual(response.status_code, 401)
++
++    def test_payload_resource_or_action_mismatch_does_not_consume_grant(self):
++        challenge = self.challenge().json()
++        grant = self.verify(challenge).json()["grant"]
++        authorizer = self.app.state.wallet_authorizer
++        for values in [
++            {"payload": {"amount": 101, "roundId": "ab" * 8}},
++            {"resource": "round:wrong"},
++            {"action": "roulette_bet"},
++        ]:
++            attempt = {
++                "address": self.address, "action": "join_room",
++                "resource": f"round:{'ab' * 8}", "payload": self.payload,
++            }
++            attempt.update(values)
++            with self.assertRaises(AuthError):
++                authorizer.consume_grant(grant, **attempt)
++        authorizer.consume_grant(grant, address=self.address, action="join_room",
++                                 resource=f"round:{'ab' * 8}", payload=self.payload)
++
++    def test_expired_challenge_and_grant_are_rejected(self):
++        clock = [1_000]
++        authorizer = WalletAuthorizer(
++            self.store, domain="test.canasino.invalid", chain_id=406, network_id=1,
++            challenge_ttl=2, grant_ttl=2, clock=lambda: clock[0],
++        )
++        challenge = authorizer.create_challenge(
++            address=self.address, action="join_room", resource="round:test",
++            body_hash=payload_hash(self.payload),
++        )
++        clock[0] = 1_003
++        signature = BasicSchemeMPL.sign(self.sk, bytes.fromhex(challenge.message_hex))
++        with self.assertRaises(AuthError):
++            authorizer.verify_challenge(
++                challenge_id=challenge.challenge_id, public_key=self.public_key.hex(),
++                signature=bytes(signature).hex(),
++            )
++
++    def test_grant_and_operation_creation_are_atomic_and_idempotent(self):
++        challenge = self.challenge().json()
++        grant = self.verify(challenge).json()["grant"]
++        operation_id = str(uuid.uuid4())
++        tx_hash = "12" * 32
++        authorizer = self.app.state.wallet_authorizer
++        first = authorizer.authorize_operation(
++            grant, operation_id=operation_id, address=self.address, action="join_room",
++            resource=f"round:{'ab' * 8}", payload=self.payload, tx_hash=tx_hash,
++        )
++        self.assertEqual(first["state"], "AUTHORIZED")
++        retry = authorizer.authorize_operation(
++            "already-consumed", operation_id=operation_id, address=self.address,
++            action="join_room", resource=f"round:{'ab' * 8}", payload=self.payload,
++            tx_hash=tx_hash,
++        )
++        self.assertEqual(retry["operation_id"], operation_id)
++        with self.assertRaises(AuthError) as conflict:
++            authorizer.authorize_operation(
++                "anything", operation_id=operation_id, address=self.address,
++                action="join_room", resource=f"round:{'ab' * 8}",
++                payload={**self.payload, "amount": 101}, tx_hash=tx_hash,
++            )
++        self.assertEqual(conflict.exception.status_code, 409)
++
++        self.assertTrue(self.store.transition_operation(operation_id, "AUTHORIZED", "PENDING", 1_001))
++        self.assertTrue(self.store.transition_operation(operation_id, "PENDING", "FINALIZED", 1_002, 55))
++        self.assertTrue(self.store.transition_operation(operation_id, "FINALIZED", "APPLIED", 1_003, 55))
++        self.assertEqual(self.store.get_operation(operation_id)["state"], "APPLIED")
++        self.assertEqual(self.store.reconcilable_operations(), [])
++
++    def test_challenge_rate_limit_is_persistent(self):
++        for _ in range(5):
++            self.assertEqual(self.challenge().status_code, 200)
++        response = self.challenge()
++        self.assertEqual(response.status_code, 429)
++        self.assertEqual(response.json()["code"], "rate_limited")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_wallet_registration.py b/tests/test_wallet_registration.py
+new file mode 100644
+index 0000000..574ccc2
+--- /dev/null
++++ b/tests/test_wallet_registration.py
+@@ -0,0 +1,164 @@
++import hashlib
++import os
++import unittest
++import uuid
++from unittest.mock import patch
++
++from blspy import BasicSchemeMPL
++from fastapi.testclient import TestClient
++
++from gameserver.app import create_app
++from gameserver.auth import payload_hash
++from gameserver.chain import ReceiptInvalid, ReceiptPending
++from gameserver.db import Store
++from tests.fakes import FakeBridge
++
++
++class ReceiptBridge(FakeBridge):
++    def __init__(self):
++        super().__init__()
++        self.receipt_mode = "valid"
++        self.receipt_calls = []
++
++    def transaction_receipt(self, tx_hash, *, sender, message_type, expected_fields=None):
++        self.receipt_calls.append({
++            "tx_hash": tx_hash, "sender": sender, "message_type": message_type,
++            "expected_fields": expected_fields,
++        })
++        if self.receipt_mode == "pending":
++            raise ReceiptPending("needs another confirmation")
++        if self.receipt_mode == "invalid":
++            raise ReceiptInvalid("transaction signer mismatch")
++        return {"height": 777, "confirmations": 2}
++
++
++class WalletRegistrationTests(unittest.TestCase):
++    def setUp(self):
++        env = patch.dict(os.environ, {
++            "CASINO_ADMIN_TOKEN": "wallet-registration-operator",
++            "CASINO_AUTH_DOMAIN": "test.canasino.invalid",
++        })
++        env.start()
++        self.addCleanup(env.stop)
++        self.store = Store(":memory:")
++        self.bridge = ReceiptBridge()
++        self.app = create_app(self.bridge, self.store)
++        self.client = TestClient(self.app)
++        self.addCleanup(self.client.close)
++        self.addCleanup(self.store.close)
++        self.admin = {"Authorization": "Bearer wallet-registration-operator"}
++        self.sk = BasicSchemeMPL.key_gen(b"wallet-registration-seed-value-32")
++        self.public_key = bytes(self.sk.get_g1())
++        self.address = hashlib.sha256(self.public_key).digest()[:20].hex()
++
++    def grant(self, action, resource, body):
++        challenge_response = self.client.post("/auth/challenges", json={
++            "address": self.address, "action": action, "resource": resource,
++            "payload_hash": payload_hash(body),
++        })
++        self.assertEqual(challenge_response.status_code, 200, challenge_response.text)
++        challenge = challenge_response.json()
++        signature = BasicSchemeMPL.sign(self.sk, bytes.fromhex(challenge["messageHex"]))
++        response = self.client.post("/auth/verify", json={
++            "challenge_id": challenge["challengeId"], "public_key": self.public_key.hex(),
++            "signature": bytes(signature).hex(),
++        })
++        self.assertEqual(response.status_code, 200, response.text)
++        return response.json()["grant"]
++
++    def open_round(self, game):
++        if game == "bingo":
++            response = self.client.post("/rounds", headers=self.admin, json={"room": "classic"})
++        else:
++            response = self.client.post(f"/{game}/rounds", headers=self.admin, json={})
++        self.assertEqual(response.status_code, 200, response.text)
++        return response.json()["roundId"]
++
++    def case(self, game, tx_byte="12"):
++        rid = self.open_round(game)
++        operation_id = str(uuid.uuid4())
++        body = {"address": self.address, "operation_id": operation_id, "tx_hash": tx_byte * 32}
++        if game == "bingo":
++            body["num_cards"] = 2
++            path, action, resource = f"/rounds/{rid}/register", "join_room", f"round:{rid}"
++        elif game == "roulette":
++            body.update({"bet_type": "red", "bet_number": 0, "amount": 1_000_000})
++            path, action, resource = (f"/roulette/rounds/{rid}/register", "roulette_bet",
++                                      f"roulette-round:{rid}")
++        else:
++            path = f"/{game}/rounds/{rid}/register"
++            action = f"join_{game}"
++            resource = f"{game}-round:{rid}"
++        return path, action, resource, body
++
++    def test_all_four_wallet_registrations_require_exact_receipt_and_become_applied(self):
++        for index, game in enumerate(("bingo", "roulette", "domino", "poker"), start=1):
++            with self.subTest(game=game):
++                path, action, resource, body = self.case(game, f"{index:02x}")
++                grant = self.grant(action, resource, body)
++                response = self.client.post(
++                    path, json=body, headers={"Authorization": f"Canasino-Wallet {grant}"},
++                )
++                self.assertEqual(response.status_code, 200, response.text)
++                self.assertEqual(response.json()["operationState"], "APPLIED")
++                self.assertEqual(response.json()["receiptHeight"], 777)
++                receipt_call_count = len(self.bridge.receipt_calls)
++                replay = self.client.post(
++                    path, json=body, headers={"Authorization": "Canasino-Wallet consumed"},
++                )
++                self.assertEqual(replay.status_code, 200, replay.text)
++                self.assertEqual(replay.json()["operationState"], "APPLIED")
++                self.assertEqual(len(self.bridge.receipt_calls), receipt_call_count)
++
++    def test_pending_receipt_resumes_with_consumed_grant(self):
++        path, action, resource, body = self.case("bingo")
++        grant = self.grant(action, resource, body)
++        self.bridge.receipt_mode = "pending"
++        pending = self.client.post(
++            path, json=body, headers={"Authorization": f"Canasino-Wallet {grant}"},
++        )
++        self.assertEqual(pending.status_code, 425, pending.text)
++        self.assertEqual(self.store.get_operation(body["operation_id"])["state"], "PENDING")
++        self.bridge.receipt_mode = "valid"
++        resumed = self.client.post(
++            path, json=body, headers={"Authorization": "Canasino-Wallet already-consumed"},
++        )
++        self.assertEqual(resumed.status_code, 200, resumed.text)
++        self.assertEqual(resumed.json()["operationState"], "APPLIED")
++
++    def test_invalid_receipt_is_permanently_rejected(self):
++        path, action, resource, body = self.case("roulette")
++        grant = self.grant(action, resource, body)
++        self.bridge.receipt_mode = "invalid"
++        rejected = self.client.post(
++            path, json=body, headers={"Authorization": f"Canasino-Wallet {grant}"},
++        )
++        self.assertEqual(rejected.status_code, 422, rejected.text)
++        self.assertEqual(self.store.get_operation(body["operation_id"])["state"], "REJECTED")
++        replay = self.client.post(
++            path, json=body, headers={"Authorization": "Canasino-Wallet consumed"},
++        )
++        self.assertEqual(replay.status_code, 409, replay.text)
++
++    def test_one_chain_transaction_cannot_back_two_operations(self):
++        path, action, resource, first_body = self.case("domino")
++        first_grant = self.grant(action, resource, first_body)
++        first = self.client.post(
++            path, json=first_body, headers={"Authorization": f"Canasino-Wallet {first_grant}"},
++        )
++        self.assertEqual(first.status_code, 200, first.text)
++        second_body = {**first_body, "operation_id": str(uuid.uuid4())}
++        second_grant = self.grant(action, resource, second_body)
++        second = self.client.post(
++            path, json=second_body, headers={"Authorization": f"Canasino-Wallet {second_grant}"},
++        )
++        self.assertEqual(second.status_code, 409, second.text)
++        self.assertEqual(second.json()["code"], "operation_conflict")
++
++    def test_wallet_scheme_is_scoped_to_registration_routes(self):
++        headers = {"Authorization": "Canasino-Wallet anything"}
++        self.assertEqual(self.client.post("/rounds", headers=headers, json={"room": "classic"}).status_code, 401)
++
++
++if __name__ == "__main__":
++    unittest.main()

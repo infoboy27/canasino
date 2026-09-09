@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { cardCost, parseTokens, formatTokens, wireAmount } from '../src/lib/amounts.js'
 import { getRooms } from '../src/lib/bingo.js'
-import { jsonGet, jsonPost } from '../src/lib/api.js'
+import { jsonGet, jsonPost, jsonPublicPost, jsonWalletPost } from '../src/lib/api.js'
 import { canopySignAndSubmit } from '../src/lib/fleet.js'
+import { payloadHash, requestWalletGrant, walletOperation } from '../src/lib/auth.js'
 
 test('decimal amounts use exact integer arithmetic', () => {
   assert.equal(parseTokens('0.000001'), 1)
@@ -24,9 +25,18 @@ test('paused writes cannot reach fetch or wallet provider', async () => {
   globalThis.fetch = async () => { calls++; throw new Error('unexpected write') }
   try {
     await assert.rejects(jsonPost('/rounds', {}), /paused/)
+    await assert.rejects(jsonWalletPost(`/rounds/${'ab'.repeat(8)}/register`, {}, 'g'.repeat(43)), /paused/)
     await assert.rejects(canopySignAndSubmit({ messageName: 'join_room' }), /paused/)
     assert.equal(calls, 0)
   } finally { globalThis.fetch = previous }
+})
+
+test('wallet operations bind a UUID and normalized exact transaction hash', () => {
+  const operation = walletOperation('ab'.repeat(20), `0x${'CD'.repeat(32)}`, { num_cards: 2 })
+  assert.match(operation.operation_id, /^[a-f0-9-]{36}$/i)
+  assert.equal(operation.tx_hash, 'cd'.repeat(32))
+  assert.equal(operation.num_cards, 2)
+  assert.throws(() => walletOperation('ab'.repeat(20), 'bad'))
 })
 test('HTTP failures and malformed JSON have safe messages', async () => {
   const previous = globalThis.fetch
@@ -66,4 +76,43 @@ test('wallet transaction hashes accept an optional 0x prefix and normalize it', 
     })
     assert.equal(result.txHash,'ab'.repeat(32))
   } finally { globalThis.window=previous }
+})
+
+test('wallet authorization payload hashing is canonical', async () => {
+  assert.equal(await payloadHash({b:2,a:{d:4,c:3}}), await payloadHash({a:{c:3,d:4},b:2}))
+  assert.notEqual(await payloadHash({amount:1}), await payloadHash({amount:2}))
+})
+
+test('only authentication endpoints bypass the wagering write pause', async () => {
+  const previous=globalThis.fetch
+  globalThis.fetch=async()=>new Response('{}',{status:200,headers:{'Content-Type':'application/json'}})
+  try {
+    assert.deepEqual(await jsonPublicPost('/auth/challenges',{}),{})
+    await assert.rejects(jsonPublicPost('/rounds',{}),/not allowlisted/)
+  } finally { globalThis.fetch=previous }
+})
+
+test('wallet grant signs the exact server challenge and validates proof shape', async () => {
+  const previousWindow=globalThis.window
+  const previousFetch=globalThis.fetch
+  const requested=[]
+  globalThis.window={fleet:{isFleetWallet:true,request:async(request)=>{
+    requested.push(request)
+    return {publicKey:'ab'.repeat(48),signature:'cd'.repeat(96)}
+  }}}
+  globalThis.fetch=async(url,options)=>{
+    const body=JSON.parse(options.body)
+    if(url.endsWith('/auth/challenges')) {
+      assert.equal(body.payload_hash,await payloadHash({amount:100,roundId:'01'}))
+      return new Response(JSON.stringify({challengeId:'12345678-1234-1234-1234-123456789abc',messageHex:'abcd'}),{status:200})
+    }
+    assert.equal(body.public_key,'ab'.repeat(48))
+    return new Response(JSON.stringify({grant:'g'.repeat(43),singleUse:true}),{status:200})
+  }
+  try {
+    const grant=await requestWalletGrant({account:{address:'ef'.repeat(20)},action:'join_room',resource:'round:01',payload:{amount:100,roundId:'01'}})
+    assert.equal(grant,'g'.repeat(43))
+    assert.equal(requested[0].method,'canopy_signMessage')
+    assert.equal(requested[0].params[0].messageHex,'abcd')
+  } finally { globalThis.window=previousWindow; globalThis.fetch=previousFetch }
 })
