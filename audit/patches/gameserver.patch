@@ -1,0 +1,1327 @@
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index b4342af..44a9c74 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -15,7 +15,7 @@ jobs:
+           python-version: "3.12"
+ 
+       - name: Install dependencies
+-        run: pip install fastapi "uvicorn[standard]" blspy protobuf httpx
++        run: pip install -r requirements.txt httpx==0.28.1
+ 
+       - name: Run tests
+         run: python -m unittest discover -s tests -t . -v
+diff --git a/Dockerfile.audit b/Dockerfile.audit
+new file mode 100644
+index 0000000..fadaf0e
+--- /dev/null
++++ b/Dockerfile.audit
+@@ -0,0 +1,6 @@
++ARG GAMESERVER_IMAGE=canasino-gameserver:latest
++FROM ${GAMESERVER_IMAGE}
++RUN pip install --no-cache-dir httpx==0.28.1 pytest==9.1.1 structlog==26.1.0
++COPY tests/ ./tests/
++ENV PYTHONDONTWRITEBYTECODE=1
++CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-q"]
+diff --git a/Dockerfile.gameserver b/Dockerfile.gameserver
+index 4d304a0..8106151 100644
+--- a/Dockerfile.gameserver
++++ b/Dockerfile.gameserver
+@@ -1,7 +1,16 @@
+ FROM python:3.12-slim
+ WORKDIR /app
+-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" blspy protobuf
++COPY requirements.txt ./requirements.txt
++RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 \
++    && pip install --no-cache-dir -r requirements.txt
+ COPY engine/ ./engine/
+ COPY gameserver/ ./gameserver/
++RUN groupadd --system casino \
++    && useradd --system --gid casino --home-dir /app --shell /usr/sbin/nologin casino \
++    && mkdir -p /app/data \
++    && chown -R casino:casino /app
++USER casino
+ EXPOSE 8090
++HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
++    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()"]
+ CMD ["python","-m","uvicorn","gameserver.asgi:app","--host","0.0.0.0","--port","8090"]
+diff --git a/engine/economy.py b/engine/economy.py
+index 8512934..fcaa11e 100644
+--- a/engine/economy.py
++++ b/engine/economy.py
+@@ -40,14 +40,24 @@ COIN_DECIMALS = 6
+ GEM_DECIMALS = 0
+ 
+ 
++def _nonnegative_integer(value: int, name: str) -> None:
++    if type(value) is not int or value < 0:
++        raise ValueError(f"{name} must be a non-negative integer")
++
++
+ def to_base_units(amount: int, currency: Currency) -> int:
+     """Display units -> on-chain uint64 base units."""
++    _nonnegative_integer(amount, "amount")
+     decimals = COIN_DECIMALS if currency == Currency.COINS else GEM_DECIMALS
+-    return int(amount) * (10 ** decimals)
++    result = amount * (10 ** decimals)
++    if result > (1 << 64) - 1:
++        raise ValueError("amount exceeds uint64 base units")
++    return result
+ 
+ 
+ def from_base_units(base: int, currency: Currency) -> int:
+     """On-chain base units -> whole display units (floor)."""
++    _nonnegative_integer(base, "base")
+     decimals = COIN_DECIMALS if currency == Currency.COINS else GEM_DECIMALS
+     return int(base) // (10 ** decimals)
+ 
+@@ -149,7 +159,7 @@ def card_selection(room_id: str) -> list[dict]:
+ 
+ 
+ def _validate_card_count(num_cards: int) -> None:
+-    if num_cards not in CARD_COST_MULTIPLIER_BPS:
++    if type(num_cards) is not int or num_cards not in CARD_COST_MULTIPLIER_BPS:
+         raise ValueError(f"num_cards must be {MIN_CARDS}..{MAX_CARDS}, got {num_cards}")
+ 
+ 
+@@ -160,13 +170,15 @@ def _validate_card_count(num_cards: int) -> None:
+ 
+ def prize_pool(entries: Sequence[int]) -> int:
+     """Gross pool = every entry fee collected for the room."""
+-    if any(e < 0 for e in entries):
+-        raise ValueError("entry amounts must be non-negative")
++    for entry in entries:
++        _nonnegative_integer(entry, "entry amount")
+     return sum(entries)
+ 
+ 
+ def apply_rake(gross_pool: int, rake_bps: int) -> tuple[int, int]:
+     """Split a gross pool into (net_to_players, house_take)."""
++    _nonnegative_integer(gross_pool, "gross_pool")
++    _nonnegative_integer(rake_bps, "rake_bps")
+     if not 0 <= rake_bps <= 10_000:
+         raise ValueError("rake_bps must be 0..10000")
+     house = gross_pool * rake_bps // 10_000
+@@ -179,6 +191,9 @@ def distribute(net_pool: int, weights_bps: Sequence[int]) -> list[int]:
+     Integer division; any rounding remainder goes to the top rank so the sum of
+     payouts always equals ``net_pool`` exactly (no coins created or lost).
+     """
++    _nonnegative_integer(net_pool, "net_pool")
++    if not weights_bps or any(type(w) is not int or w <= 0 for w in weights_bps):
++        raise ValueError("payout weights must be positive integers")
+     if sum(weights_bps) != 10_000:
+         raise ValueError("payout weights must sum to 10000 bps")
+     payouts = [net_pool * w // 10_000 for w in weights_bps]
+@@ -371,15 +386,19 @@ class Balance:
+     xp: int = 0
+ 
+     def can_afford(self, currency: Currency, amount: int) -> bool:
++        _nonnegative_integer(amount, "amount")
+         return getattr(self, currency.value) >= amount
+ 
+     def credit(self, reward: Reward) -> "Balance":
++        for amount in (reward.coins, reward.gems, reward.xp):
++            _nonnegative_integer(amount, "reward amount")
+         self.coins += reward.coins
+         self.gems += reward.gems
+         self.xp += reward.xp
+         return self
+ 
+     def debit(self, currency: Currency, amount: int) -> "Balance":
++        _nonnegative_integer(amount, "amount")
+         if amount < 0:
+             raise ValueError("cannot debit a negative amount")
+         if not self.can_afford(currency, amount):
+diff --git a/gameserver/app.py b/gameserver/app.py
+index 5e5d490..1a4e540 100644
+--- a/gameserver/app.py
++++ b/gameserver/app.py
+@@ -62,9 +62,10 @@ import secrets
+ import time
+ from dataclasses import asdict
+ 
+-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
++from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
+ from fastapi.middleware.cors import CORSMiddleware
+-from pydantic import BaseModel, field_validator
++from fastapi.responses import JSONResponse
++from pydantic import BaseModel, Field, field_validator
+ 
+ from engine import card as ecard, economy as econ, rules as erules
+ from engine import roulette as eroulette
+@@ -76,6 +77,7 @@ from .rooms import RoomManager
+ from .roulette_rooms import RouletteManager
+ from .domino_rooms import DominoManager
+ from .poker_rooms import PokerManager
++from .security import OperatorBoundary
+ 
+ MAX_OPEN_ROUNDS_PER_ROOM = 5
+ MAX_OPEN_ROUNDS_TOTAL = 20
+@@ -121,17 +123,17 @@ class CreateRound(BaseModel):
+ 
+ 
+ class RegisterBody(BaseModel):
+-    address: str
+-    num_cards: int = 1
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
++    num_cards: int = Field(default=1, strict=True, ge=1, le=4)
+ 
+ 
+ class JoinBody(BaseModel):
+-    num_cards: int = 1
+-    nickname: str | None = None
++    num_cards: int = Field(default=1, strict=True, ge=1, le=4)
++    nickname: str | None = Field(default=None, max_length=32)
+ 
+ 
+ class GemsTopupBody(BaseModel):
+-    amount: int = 200
++    amount: int = Field(default=200, strict=True, ge=1, le=1_000_000_000)
+ 
+ 
+ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
+@@ -143,9 +145,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
+ 
+ class RouletteBetBody(BaseModel):
+     bet_type: str
+-    bet_number: int = 0
+-    amount: int
+-    nickname: str | None = None
++    bet_number: int = Field(default=0, strict=True, ge=0, le=36)
++    amount: int = Field(strict=True)
++    nickname: str | None = Field(default=None, max_length=32)
+ 
+     @field_validator("amount")
+     @classmethod
+@@ -157,10 +159,10 @@ class RouletteBetBody(BaseModel):
+ 
+ 
+ class RouletteRegisterBody(BaseModel):
+-    address: str
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+     bet_type: str
+-    bet_number: int = 0
+-    amount: int
++    bet_number: int = Field(default=0, strict=True, ge=0, le=36)
++    amount: int = Field(strict=True)
+ 
+     @field_validator("amount")
+     @classmethod
+@@ -172,18 +174,18 @@ class RouletteRegisterBody(BaseModel):
+ 
+ 
+ class DominoJoinBody(BaseModel):
+-    nickname: str | None = None
++    nickname: str | None = Field(default=None, max_length=32)
+ 
+ 
+ class DominoRegisterBody(BaseModel):
+-    address: str
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+ 
+ 
+ class DominoMoveBody(BaseModel):
+-    address: str
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+     action: str                     # 'play' | 'draw' | 'pass'
+-    tile: list[int] | None = None   # [low, high] -- required for 'play'
+-    end: str | None = None          # 'left' | 'right' -- required for 'play' once the board is non-empty
++    tile: list[int] | None = Field(default=None, min_length=2, max_length=2)
++    end: str | None = Field(default=None, pattern=r"^(left|right)$")
+ 
+     @field_validator("action")
+     @classmethod
+@@ -194,17 +196,17 @@ class DominoMoveBody(BaseModel):
+ 
+ 
+ class PokerJoinBody(BaseModel):
+-    nickname: str | None = None
++    nickname: str | None = Field(default=None, max_length=32)
+ 
+ 
+ class PokerRegisterBody(BaseModel):
+-    address: str
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+ 
+ 
+ class PokerActionBody(BaseModel):
+-    address: str
++    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+     action: str        # 'fold' | 'check_call' | 'bet_raise'
+-    amount: int = 0     # only meaningful for 'bet_raise' -- total contributed to the street after this action
++    amount: int = Field(default=0, strict=True, ge=0, le=POKER_BUY_IN)
+ 
+     @field_validator("action")
+     @classmethod
+@@ -242,7 +244,7 @@ def _load_or_create_admin_token(store: Store) -> str:
+         return token
+     token = secrets.token_hex(24)
+     store.save_setting("admin_token", token)
+-    print(f"[casino-gameserver] No CASINO_ADMIN_TOKEN set — generated and persisted one: {token}",
++    print("[casino-gameserver] No CASINO_ADMIN_TOKEN set — generated and persisted a private credential.",
+           flush=True)
+     print("[casino-gameserver] Set CASINO_ADMIN_TOKEN in the environment to control this explicitly.",
+           flush=True)
+@@ -266,9 +268,12 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         "https://canasino.org,https://www.canasino.org"
+     )
+     cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
++    if "*" in cors_origins:
++        raise ValueError("CASINO_CORS_ORIGINS must list explicit trusted origins")
++    app.add_middleware(OperatorBoundary, token=admin_token, origins=cors_origins)
+     app.add_middleware(
+         CORSMiddleware, allow_origins=cors_origins, allow_credentials=False,
+-        allow_methods=["*"], allow_headers=["*"],
++        allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"],
+     )
+     app.state.manager = manager
+     app.state.roulette_manager = roulette_manager
+@@ -300,9 +305,22 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+             poker_conns[rid].remove(ws)
+ 
+     def require_admin(authorization: str | None = Header(default=None)) -> None:
+-        if authorization != f"Bearer {admin_token}":
++        if not authorization or not secrets.compare_digest(authorization.encode(), f"Bearer {admin_token}".encode()):
+             raise HTTPException(status_code=401, detail="admin token required")
+ 
++    @app.exception_handler(KeyError)
++    async def missing_resource(request, exc):
++        return JSONResponse({"detail": "Resource not found"}, status_code=404)
++
++    @app.exception_handler(ValueError)
++    async def invalid_request(request, exc):
++        return JSONResponse({"detail": "Invalid request or game state"}, status_code=422)
++
++    @app.get("/capabilities")
++    def capabilities():
++        return {"real_money_enabled": False, "player_actions_enabled": False,
++                "reason": "wallet_auth_required"}
++
+     @app.get("/health")
+     def health():
+         return {"ok": True, "operator": operator.address, "rounds": len(manager.rounds),
+@@ -343,7 +361,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         ]
+ 
+     @app.get("/players/{address}/wallet")
+-    def player_wallet(address: str):
++    def player_wallet(address: str = Path(pattern=r"^[0-9a-fA-F]{40}$")):
+         """Available (on-chain account balance) + locked (escrowed in open
+         rounds) + settled-round history, in one call for the Wallet screen."""
+         addr = address.lower()
+@@ -356,11 +374,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         }
+ 
+     @app.get("/players/{address}/gems")
+-    def player_gems(address: str):
++    def player_gems(address: str = Path(pattern=r"^[0-9a-fA-F]{40}$")):
+         return {"address": address.lower(), "gems": manager.bridge.gems(address.lower())}
+ 
+     @app.post("/players/{address}/gems/topup", dependencies=[Depends(require_admin)])
+-    def gems_topup(address: str, body: GemsTopupBody):
++    def gems_topup(body: GemsTopupBody, address: str = Path(pattern=r"^[0-9a-fA-F]{40}$")):
+         """Admin-only: there is no payment processor yet, so gems are normally
+         minted by the operator once a real IAP clears. Requires the admin
+         token — never reachable from client code without it."""
+@@ -436,17 +454,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "blockHeight": rnd.settle_height if settled else None}
+ 
+     @app.get("/rounds/{rid}/card")
+-    def get_card(rid: str, address: str, num_cards: int = 1):
++    def get_card(rid: str, address: str = Query(pattern=r"^[0-9a-fA-F]{40}$"), num_cards: int = Query(default=1, ge=1, le=4)):
+         """The player's card grids (server holds the seed; revealing card
+         numbers does not leak the seed). Used after a wallet-signed join."""
+         rnd = manager.rounds[rid]
++        participant = rnd.participants.get(address.lower())
++        if participant is None or participant.num_cards != num_cards:
++            raise HTTPException(status_code=403, detail="Registered cards required")
+         cards = [c.rows() for c in manager.cards_for(rnd, address, int(num_cards))]
+         return {"player": address, "numCards": int(num_cards), "cards": cards}
+ 
+     # --- player history / stats (SQLite-backed, written at settle) ------------
+ 
+     @app.get("/players/{address}/history")
+-    def player_history(address: str, limit: int = 50):
++    def player_history(address: str, limit: int = Query(default=50, ge=1, le=100)):
+         return store.history_for(address.lower(), limit)
+ 
+     @app.get("/players/{address}/stats")
+@@ -454,7 +475,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+         return store.stats_for(address.lower())
+ 
+     @app.get("/leaderboard")
+-    def leaderboard(period: str = "alltime", limit: int = 50):
++    def leaderboard(period: str = "alltime", limit: int = Query(default=50, ge=1, le=100)):
+         if period not in ("daily", "weekly", "monthly", "alltime"):
+             period = "alltime"
+         return store.leaderboard(period, limit)
+@@ -519,7 +540,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "blockHeight": rnd.settle_height if settled else None}
+ 
+     @app.get("/players/{address}/roulette/history")
+-    def player_roulette_history(address: str, limit: int = 50):
++    def player_roulette_history(address: str, limit: int = Query(default=50, ge=1, le=100)):
+         return store.roulette_history_for(address.lower(), limit)
+ 
+     @app.websocket("/ws/roulette/{rid}")
+@@ -600,10 +621,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "rpcUrl": domino_manager.bridge.query_url}
+ 
+     @app.get("/domino/rounds/{rid}/hand")
+-    def get_domino_hand(rid: str, address: str):
+-        """The caller's own hand -- trusts the address param the same way
+-        Bingo's card-reveal endpoint does; there is no wallet-signature-based
+-        request auth anywhere else in this API either."""
++    def get_domino_hand(rid: str, address: str = Query(pattern=r"^[0-9a-fA-F]{40}$")):
++        """Operator-only diagnostic. Public player sessions are not implemented."""
+         hand = domino_manager.hand_for(rid, address.lower())
+         return {"address": address.lower(), "hand": [list(t) for t in hand]}
+ 
+@@ -620,7 +639,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "blockHeight": rnd.settle_height if settled else None}
+ 
+     @app.get("/players/{address}/domino/history")
+-    def player_domino_history(address: str, limit: int = 50):
++    def player_domino_history(address: str, limit: int = Query(default=50, ge=1, le=100)):
+         return store.domino_history_for(address.lower(), limit)
+ 
+     @app.post("/domino/rounds/{rid}/move")
+@@ -748,9 +767,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "rpcUrl": poker_manager.bridge.query_url}
+ 
+     @app.get("/poker/rounds/{rid}/hand")
+-    def get_poker_hand(rid: str, address: str):
+-        """The caller's own hole cards -- trusts the address param the same
+-        way Domino's hand-reveal endpoint does."""
++    def get_poker_hand(rid: str, address: str = Query(pattern=r"^[0-9a-fA-F]{40}$")):
++        """Operator-only diagnostic. Public player sessions are not implemented."""
+         hole = poker_manager.hole_cards_for(rid, address.lower())
+         return {"address": address.lower(), "hole": [list(c) for c in hole]}
+ 
+@@ -758,7 +776,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+     def poker_proof(rid: str):
+         rnd = poker_manager.rounds[rid]
+         settled = rnd.status == "settled"
+-        result = rnd.result
++        result = rnd.result if settled else None
+         return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
+                 "seed": rnd.seed.hex() if settled else None,
+                 "actions": rnd.actions if settled else None,
+@@ -770,7 +788,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "blockHeight": rnd.settle_height if settled else None}
+ 
+     @app.get("/players/{address}/poker/history")
+-    def player_poker_history(address: str, limit: int = 50):
++    def player_poker_history(address: str, limit: int = Query(default=50, ge=1, le=100)):
+         return store.poker_history_for(address.lower(), limit)
+ 
+     @app.post("/poker/rounds/{rid}/action")
+diff --git a/gameserver/db.py b/gameserver/db.py
+index 95a5723..b709b12 100644
+--- a/gameserver/db.py
++++ b/gameserver/db.py
+@@ -17,6 +17,8 @@ import json
+ import os
+ import sqlite3
+ import time
++import threading
++from functools import wraps
+ from typing import Dict, List, Optional
+ 
+ DB_PATH = os.environ.get("CASINO_DB_PATH", "/app/data/canasino.db")
+@@ -121,21 +123,60 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
+     actions TEXT NOT NULL DEFAULT '[]',
+     created_at INTEGER
+ );
++CREATE INDEX IF NOT EXISTS rounds_settled_at ON rounds(settled_at);
++CREATE INDEX IF NOT EXISTS roulette_settled_at ON roulette_rounds(settled_at);
++CREATE INDEX IF NOT EXISTS domino_settled_at ON domino_rounds(settled_at);
++CREATE INDEX IF NOT EXISTS poker_settled_at ON poker_rounds(settled_at);
++CREATE INDEX IF NOT EXISTS stats_total_won ON player_stats(total_won DESC);
+ """
+ 
+ _PERIOD_SECONDS = {"daily": 86_400, "weekly": 7 * 86_400, "monthly": 30 * 86_400}
+ 
+ 
++def _serialized_store(cls):
++    """A shared SQLite connection must not interleave transactions across threads.
++
++    Wrapping the full method also rolls back history and stats together on error.
++    INSERT OR IGNORE below handles competing *connections*, not just this lock.
++    """
++    def serialized(method):
++        @wraps(method)
++        def call(self, *args, **kwargs):
++            with self._lock, self._conn:
++                return method(self, *args, **kwargs)
++        return call
++
++    for name, method in list(vars(cls).items()):
++        if callable(method) and not name.startswith("_") and name != "close":
++            setattr(cls, name, serialized(method))
++    return cls
++
++
++@_serialized_store
+ class Store:
+     def __init__(self, path: str = DB_PATH):
+         d = os.path.dirname(path)
+         if d:
+-            os.makedirs(d, exist_ok=True)
+-        self._conn = sqlite3.connect(path, check_same_thread=False)
++            os.makedirs(d, mode=0o700, exist_ok=True)
++        if path != ':memory:':
++            # The database contains operator keys and unrevealed game seeds.
++            # Create it privately before SQLite opens a WAL or writes secrets.
++            try:
++                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
++                os.close(fd)
++            except FileExistsError:
++                pass
++            os.chmod(path, 0o600)
++        self._lock = threading.RLock()
++        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=15)
+         self._conn.execute("PRAGMA journal_mode=WAL")
+         self._conn.executescript(SCHEMA)
+         self._conn.commit()
+ 
++    def close(self):
++        with self._lock:
++            self._conn.close()
++
+     # -- round history / stats (written once, at settle) ---------------------
+ 
+     def record_settle(self, round_id_hex: str, room: str, entry_fee: int, rake_bps: int,
+@@ -146,20 +187,15 @@ class Store:
+         Idempotent: a retried/duplicate settle call for the same round_id_hex
+         (e.g. a client reconnect replaying the WS flow after a restart) must
+         not double-count player_stats — the chain only ever pays out once."""
+-        already_recorded = self._conn.execute(
+-            "SELECT 1 FROM rounds WHERE round_id = ?", (round_id_hex,)
+-        ).fetchone() is not None
+-
+         winners = winners if winners is not None else [a for a, d in payouts.items() if d > 0]
+         now = int(time.time())
+-        self._conn.execute(
+-            "INSERT OR REPLACE INTO rounds "
++        inserted = self._conn.execute(
++            "INSERT OR IGNORE INTO rounds "
+             "(round_id, room, entry_fee, rake_bps, winners, payouts, settle_tx_hash, settled_at) "
+             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (round_id_hex, room, entry_fee, rake_bps, json.dumps(winners), json.dumps(payouts), tx_hash, now),
+         )
+-        if already_recorded:
+-            self._conn.commit()
++        if inserted.rowcount == 0:
+             return
+ 
+         winner_set = set(winners)
+@@ -217,12 +253,19 @@ class Store:
+                     for a, g, w, t in cur.fetchall()]
+         since = int(time.time()) - window
+         cur = self._conn.execute(
+-            "SELECT winners, payouts FROM rounds WHERE settled_at >= ?", (since,),
++            "SELECT winners, payouts FROM rounds WHERE settled_at >= ? "
++            "UNION ALL SELECT NULL, payouts FROM roulette_rounds WHERE settled_at >= ? "
++            "UNION ALL SELECT winners, payouts FROM domino_rounds WHERE settled_at >= ? "
++            "UNION ALL SELECT winners, payouts FROM poker_rounds WHERE settled_at >= ?",
++            (since, since, since, since),
+         )
+         agg: Dict[str, dict] = {}
+         for winners_json, payouts_json in cur.fetchall():
+-            winners = set(json.loads(winners_json))
+-            for addr, delta in json.loads(payouts_json).items():
++            payouts = json.loads(payouts_json)
++            winners = set(json.loads(winners_json)) if winners_json is not None else {
++                address for address, delta in payouts.items() if delta > 0
++            }
++            for addr, delta in payouts.items():
+                 s = agg.setdefault(addr, {"address": addr, "gamesPlayed": 0, "wins": 0, "totalWon": 0})
+                 s["gamesPlayed"] += 1
+                 s["wins"] += 1 if addr in winners else 0
+@@ -296,19 +339,14 @@ class Store:
+         for the same round_id_hex must not double-count player_stats. Shares
+         the player_stats table with Bingo — a player's win rate/total won is
+         tracked across every game, not siloed per game."""
+-        already_recorded = self._conn.execute(
+-            "SELECT 1 FROM roulette_rounds WHERE round_id = ?", (round_id_hex,)
+-        ).fetchone() is not None
+-
+         now = int(time.time())
+-        self._conn.execute(
+-            "INSERT OR REPLACE INTO roulette_rounds "
++        inserted = self._conn.execute(
++            "INSERT OR IGNORE INTO roulette_rounds "
+             "(round_id, rake_bps, spin, payouts, settle_tx_hash, settled_at) "
+             "VALUES (?, ?, ?, ?, ?, ?)",
+             (round_id_hex, rake_bps, spin, json.dumps(payouts), tx_hash, now),
+         )
+-        if already_recorded:
+-            self._conn.commit()
++        if inserted.rowcount == 0:
+             return
+ 
+         for addr, delta in payouts.items():
+@@ -384,20 +422,15 @@ class Store:
+                               tx_hash: str) -> None:
+         """Same idempotency guarantee as record_settle/record_roulette_settle.
+         Shares player_stats with every other game."""
+-        already_recorded = self._conn.execute(
+-            "SELECT 1 FROM domino_rounds WHERE round_id = ?", (round_id_hex,)
+-        ).fetchone() is not None
+-
+         now = int(time.time())
+-        self._conn.execute(
+-            "INSERT OR REPLACE INTO domino_rounds "
++        inserted = self._conn.execute(
++            "INSERT OR IGNORE INTO domino_rounds "
+             "(round_id, entry_fee, rake_bps, winners, reason, payouts, settle_tx_hash, settled_at) "
+             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (round_id_hex, entry_fee, rake_bps, json.dumps(winners), reason,
+              json.dumps(payouts), tx_hash, now),
+         )
+-        if already_recorded:
+-            self._conn.commit()
++        if inserted.rowcount == 0:
+             return
+ 
+         winner_set = set(winners)
+@@ -487,21 +520,16 @@ class Store:
+                              tx_hash: str) -> None:
+         """Same idempotency guarantee as record_settle/record_domino_settle.
+         Shares player_stats with every other game."""
+-        already_recorded = self._conn.execute(
+-            "SELECT 1 FROM poker_rounds WHERE round_id = ?", (round_id_hex,)
+-        ).fetchone() is not None
+-
+         now = int(time.time())
+-        self._conn.execute(
+-            "INSERT OR REPLACE INTO poker_rounds "
++        inserted = self._conn.execute(
++            "INSERT OR IGNORE INTO poker_rounds "
+             "(round_id, small_blind, big_blind, buy_in, rake_bps, winners, reason, payouts, "
+             " settle_tx_hash, settled_at) "
+             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (round_id_hex, small_blind, big_blind, buy_in, rake_bps, json.dumps(winners), reason,
+              json.dumps(payouts), tx_hash, now),
+         )
+-        if already_recorded:
+-            self._conn.commit()
++        if inserted.rowcount == 0:
+             return
+ 
+         winner_set = set(winners)
+diff --git a/gameserver/domino_rooms.py b/gameserver/domino_rooms.py
+index 2895d4e..a2931db 100644
+--- a/gameserver/domino_rooms.py
++++ b/gameserver/domino_rooms.py
+@@ -15,6 +15,7 @@ gameserver (e.g. Bingo's card reveal) -- not a new gap introduced here.
+ from __future__ import annotations
+ 
+ import secrets
++from threading import RLock
+ from dataclasses import dataclass, field
+ from typing import Dict, List, Optional, Tuple
+ 
+@@ -23,6 +24,7 @@ from engine.rng import commitment
+ 
+ from .chain import CanopyBridge, Key
+ from .db import Store
++from .synchronization import synchronized, settled_once
+ 
+ 
+ @dataclass
+@@ -73,6 +75,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+ 
+ class DominoManager:
+     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++        self._state_lock = RLock()
++        self._settled_results = {}
+         self.bridge = bridge
+         self.operator = operator
+         self.store = store
+@@ -109,6 +113,7 @@ class DominoManager:
+             rnd.result = engine.result
+         return engine
+ 
++    @synchronized
+     def open_round(self, entry_fee: int, rake_bps: int) -> DominoRound:
+         seed = secrets.token_bytes(32)
+         round_id = secrets.token_bytes(8)
+@@ -120,6 +125,7 @@ class DominoManager:
+             self.store.save_domino_open_round(rnd.id_hex, seed.hex(), commit.hex(), entry_fee, rake_bps)
+         return rnd
+ 
++    @synchronized
+     def join(self, round_id_hex: str, nickname: str | None = None) -> str:
+         rnd = self.rounds[round_id_hex]
+         if rnd.status != "open":
+@@ -135,8 +141,13 @@ class DominoManager:
+             self._rebuild_engine(rnd)
+         return key.address
+ 
++    @synchronized
+     def register_external(self, round_id_hex: str, address: str) -> str:
+         rnd = self.rounds[round_id_hex]
++        if rnd.status != "open":
++            raise ValueError("round not open")
++        if address.lower() in rnd.participants:
++            return address.lower()
+         if len(rnd.participants) >= edomino.NUM_PLAYERS:
+             raise ValueError("round already has enough players")
+         addr = address.lower()
+@@ -153,6 +164,7 @@ class DominoManager:
+     def player_index(self, rnd: DominoRound, address: str) -> int:
+         return rnd.player_order.index(address.lower())
+ 
++    @synchronized
+     def apply_move(self, round_id_hex: str, address: str, action: str,
+                     tile: Optional[Tuple[int, int]] = None, end: Optional[str] = None):
+         """Validates and applies one move. Raises engine.domino.IllegalMove on
+@@ -192,6 +204,7 @@ class DominoManager:
+         return sum(rnd.entry_fee for rnd in self.rounds.values()
+                    if rnd.status == "open" and addr in rnd.participants)
+ 
++    @settled_once
+     def settle(self, round_id_hex: str) -> dict:
+         rnd = self.rounds[round_id_hex]
+         engine = self.engines[round_id_hex]
+diff --git a/gameserver/poker_rooms.py b/gameserver/poker_rooms.py
+index 4014299..58ddbe8 100644
+--- a/gameserver/poker_rooms.py
++++ b/gameserver/poker_rooms.py
+@@ -16,6 +16,7 @@ a new gap introduced here.
+ from __future__ import annotations
+ 
+ import secrets
++from threading import RLock
+ from dataclasses import dataclass, field
+ from typing import Dict, List, Optional
+ 
+@@ -24,6 +25,7 @@ from engine.rng import commitment
+ 
+ from .chain import CanopyBridge, Key
+ from .db import Store
++from .synchronization import synchronized, settled_once
+ 
+ 
+ @dataclass
+@@ -75,6 +77,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+ 
+ class PokerManager:
+     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++        self._state_lock = RLock()
++        self._settled_results = {}
+         self.bridge = bridge
+         self.operator = operator
+         self.store = store
+@@ -113,6 +117,7 @@ class PokerManager:
+             rnd.result = engine.result
+         return engine
+ 
++    @synchronized
+     def open_round(self, small_blind: int, big_blind: int, buy_in: int, rake_bps: int) -> PokerRound:
+         seed = secrets.token_bytes(32)
+         round_id = secrets.token_bytes(8)
+@@ -125,6 +130,7 @@ class PokerManager:
+                                               small_blind, big_blind, buy_in, rake_bps)
+         return rnd
+ 
++    @synchronized
+     def join(self, round_id_hex: str, nickname: str | None = None) -> str:
+         rnd = self.rounds[round_id_hex]
+         if rnd.status != "open":
+@@ -140,8 +146,13 @@ class PokerManager:
+             self._rebuild_engine(rnd)
+         return key.address
+ 
++    @synchronized
+     def register_external(self, round_id_hex: str, address: str) -> str:
+         rnd = self.rounds[round_id_hex]
++        if rnd.status != "open":
++            raise ValueError("round not open")
++        if address.lower() in rnd.participants:
++            return address.lower()
+         if len(rnd.participants) >= epoker.NUM_PLAYERS:
+             raise ValueError("round already has enough players")
+         addr = address.lower()
+@@ -158,6 +169,7 @@ class PokerManager:
+     def player_index(self, rnd: PokerRound, address: str) -> int:
+         return rnd.player_order.index(address.lower())
+ 
++    @synchronized
+     def apply_action(self, round_id_hex: str, address: str, action: str, amount: int = 0):
+         """Validates and applies one betting action. Raises engine.poker.IllegalMove
+         on an illegal action, or ValueError if the round/turn state doesn't
+@@ -198,6 +210,7 @@ class PokerManager:
+         return sum(rnd.buy_in for rnd in self.rounds.values()
+                    if rnd.status == "open" and addr in rnd.participants)
+ 
++    @settled_once
+     def settle(self, round_id_hex: str) -> dict:
+         rnd = self.rounds[round_id_hex]
+         engine = self.engines[round_id_hex]
+diff --git a/gameserver/rooms.py b/gameserver/rooms.py
+index 12b56c4..978e947 100644
+--- a/gameserver/rooms.py
++++ b/gameserver/rooms.py
+@@ -15,6 +15,7 @@ operator/player keys needed to sign a settle for that round.
+ from __future__ import annotations
+ 
+ import secrets
++from threading import RLock
+ from dataclasses import dataclass, field
+ from typing import Dict, List, Optional
+ 
+@@ -23,6 +24,7 @@ from engine.rng import derive_seed, commitment
+ 
+ from .chain import CanopyBridge, Key
+ from .db import Store
++from .synchronization import synchronized, settled_once
+ 
+ 
+ @dataclass
+@@ -65,6 +67,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+ 
+ class RoomManager:
+     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++        self._state_lock = RLock()
++        self._settled_results = {}
+         self.bridge = bridge
+         self.operator = operator
+         self.store = store
+@@ -93,6 +97,7 @@ class RoomManager:
+             )
+             self.rounds[rnd.id_hex] = rnd
+ 
++    @synchronized
+     def create_round(self, entry_fee: int = 100_000_000, rake_bps: int = 1_000,
+                      payout_weights_bps=(10_000,), room: str = "") -> Round:
+         seed = secrets.token_bytes(32)
+@@ -108,7 +113,9 @@ class RoomManager:
+                                        list(payout_weights_bps), room, rnd.order)
+         return rnd
+ 
++    @synchronized
+     def add_player(self, round_id_hex: str, num_cards: int = 1, nickname: str | None = None) -> str:
++        econ._validate_card_count(num_cards)
+         rnd = self.rounds[round_id_hex]
+         if rnd.status != "open":
+             raise ValueError("round not open")
+@@ -121,11 +128,20 @@ class RoomManager:
+         self._persist_participants(rnd)
+         return key.address
+ 
++    @synchronized
+     def register_external(self, round_id_hex: str, address: str, num_cards: int) -> str:
+         """Record a player who joined on-chain from their OWN wallet (bingo_join).
+         The server did not sign the join, so there is no key; settle is operator-
+         signed and reads participants from chain, so only address+num_cards matter."""
+         rnd = self.rounds[round_id_hex]
++        if rnd.status != "open":
++            raise ValueError("round not open")
++        econ._validate_card_count(num_cards)
++        existing = rnd.participants.get(address.lower())
++        if existing is not None:
++            if existing.num_cards != num_cards:
++                raise ValueError("player already registered with a different card count")
++            return address.lower()
+         rnd.participants[address.lower()] = Participant(key=None, num_cards=num_cards)
+         self._persist_participants(rnd)
+         return address.lower()
+@@ -172,7 +188,10 @@ class RoomManager:
+                 out.append(addr)
+         return out
+ 
++    @settled_once
+     def settle(self, round_id_hex: str, pattern: str = "line") -> dict:
++        if pattern != "line":
++            raise ValueError("round pattern is fixed to line")
+         rnd = self.rounds[round_id_hex]
+         before = {a: self.bridge.account_balance(a) for a in rnd.participants}
+         tx_hash = self.bridge.settle_room(self.operator, rnd.round_id, rnd.seed, pattern)
+diff --git a/gameserver/roulette_rooms.py b/gameserver/roulette_rooms.py
+index d44c9d7..5ef4c38 100644
+--- a/gameserver/roulette_rooms.py
++++ b/gameserver/roulette_rooms.py
+@@ -16,6 +16,7 @@ escrowed bets with no key left able to sign the settle.
+ from __future__ import annotations
+ 
+ import secrets
++from threading import RLock
+ import time
+ from dataclasses import dataclass, field
+ from typing import Dict, List, Optional
+@@ -25,6 +26,7 @@ from engine.rng import commitment
+ 
+ from .chain import CanopyBridge, Key
+ from .db import Store
++from .synchronization import synchronized, settled_once
+ 
+ 
+ @dataclass
+@@ -67,6 +69,8 @@ def _serialize_bets(bets: Dict[str, Bet]) -> dict:
+ 
+ class RouletteManager:
+     def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
++        self._state_lock = RLock()
++        self._settled_results = {}
+         self.bridge = bridge
+         self.operator = operator
+         self.store = store
+@@ -91,6 +95,7 @@ class RouletteManager:
+             )
+             self.rounds[rnd.id_hex] = rnd
+ 
++    @synchronized
+     def open_round(self, rake_bps: int) -> RouletteRound:
+         seed = secrets.token_bytes(32)
+         round_id = secrets.token_bytes(8)
+@@ -102,6 +107,7 @@ class RouletteManager:
+             self.store.save_roulette_open_round(rnd.id_hex, seed.hex(), commit.hex(), rake_bps)
+         return rnd
+ 
++    @synchronized
+     def place_bet(self, round_id_hex: str, bet_type: str, bet_number: int, amount: int,
+                   nickname: str | None = None) -> str:
+         rnd = self.rounds[round_id_hex]
+@@ -115,6 +121,7 @@ class RouletteManager:
+         self._persist_bets(rnd)
+         return key.address
+ 
++    @synchronized
+     def register_external_bet(self, round_id_hex: str, address: str, bet_type: str,
+                               bet_number: int, amount: int) -> str:
+         """Record a bettor who bet on-chain from their OWN wallet. The server
+@@ -122,6 +129,13 @@ class RouletteManager:
+         chain itself pays from its own bet records, so this is bookkeeping
+         only (needed to report this address's delta after settle)."""
+         rnd = self.rounds[round_id_hex]
++        if rnd.status != "open":
++            raise ValueError("round not open")
++        existing = rnd.bets.get(address.lower())
++        if existing is not None:
++            if (existing.bet_type, existing.bet_number, existing.amount) != (bet_type, bet_number, amount):
++                raise ValueError("address already registered with a different bet")
++            return address.lower()
+         rnd.bets[address.lower()] = Bet(key=None, bet_type=bet_type, bet_number=bet_number, amount=amount)
+         self._persist_bets(rnd)
+         return address.lower()
+@@ -144,6 +158,7 @@ class RouletteManager:
+                 total += b.amount
+         return total
+ 
++    @settled_once
+     def settle(self, round_id_hex: str) -> dict:
+         rnd = self.rounds[round_id_hex]
+         before = {a: self.bridge.account_balance(a) for a in rnd.bets}
+diff --git a/gameserver/security.py b/gameserver/security.py
+new file mode 100644
+index 0000000..29dab00
+--- /dev/null
++++ b/gameserver/security.py
+@@ -0,0 +1,84 @@
++"""Fail-closed transport policy until wallet-bound authentication is implemented.
++
++An address is public information, not proof of ownership. The operator bearer
++credential is for trusted server-side operations only and MUST NOT reach a browser.
++"""
++
++import asyncio
++import secrets
++
++from starlette.datastructures import Headers
++from starlette.responses import JSONResponse
++
++MAX_BODY_BYTES = 16_384
++
++
++class OperatorBoundary:
++    def __init__(self, app, token: str, origins: list[str]):
++        self.app = app
++        self.expected = f"Bearer {token}".encode()
++        self.origins = frozenset(origins)
++
++    async def __call__(self, scope, receive, send):
++        if scope["type"] not in ("http", "websocket"):
++            return await self.app(scope, receive, send)
++        headers = Headers(scope=scope)
++        websocket = scope["type"] == "websocket"
++        # All current sockets either drive settlement or expose live game state.
++        # Keep them operator-only until player sessions and bounded subscriptions
++        # exist; never put this bearer credential into a URL.
++        private = websocket or scope["method"] not in ("GET", "HEAD", "OPTIONS") or (
++            scope["path"].rstrip("/").endswith(("/hand", "/card"))
++        )
++        authorization = headers.getlist("authorization")
++        authenticated = len(authorization) == 1 and secrets.compare_digest(
++            authorization[0].encode(), self.expected
++        )
++        if websocket:
++            origin = headers.get("origin")
++            if not authenticated or (origin is not None and origin not in self.origins):
++                await send({"type": "websocket.close", "code": 1008})
++                return
++        elif private and not authenticated:
++            return await JSONResponse(
++                {"detail": "Wallet authentication is unavailable; trusted operator access required.",
++                 "code": "wallet_auth_required"}, status_code=401,
++                headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"},
++            )(scope, receive, send)
++
++        if not websocket:
++            # Bound chunked bodies too, before FastAPI materializes the JSON.
++            body = bytearray()
++            more = True
++            try:
++                async with asyncio.timeout(10):
++                    while more:
++                        message = await receive()
++                        if message["type"] == "http.disconnect":
++                            return
++                        body.extend(message.get("body", b""))
++                        if len(body) > MAX_BODY_BYTES:
++                            return await JSONResponse({"detail": "Request body too large"}, 413)(scope, receive, send)
++                        more = message.get("more_body", False)
++            except TimeoutError:
++                return await JSONResponse({"detail": "Request body timed out"}, 408)(scope, receive, send)
++            delivered = False
++
++            async def bounded_receive():
++                nonlocal delivered
++                if not delivered:
++                    delivered = True
++                    return {"type": "http.request", "body": bytes(body), "more_body": False}
++                return await receive()
++
++            async def secure_send(message):
++                if message["type"] == "http.response.start":
++                    message["headers"] = list(message.get("headers", [])) + [
++                        (b"x-content-type-options", b"nosniff"),
++                        (b"cache-control", b"no-store"),
++                        (b"referrer-policy", b"no-referrer"),
++                    ]
++                await send(message)
++
++            return await self.app(scope, bounded_receive, secure_send)
++        return await self.app(scope, receive, send)
+diff --git a/gameserver/synchronization.py b/gameserver/synchronization.py
+new file mode 100644
+index 0000000..e1b30cc
+--- /dev/null
++++ b/gameserver/synchronization.py
+@@ -0,0 +1,31 @@
++"""Serialize in-process room transitions; not a distributed transaction lock.
++
++The deployment must use a single game-server process until state transitions
++and transaction recovery are backed by a durable shared coordinator.
++"""
++
++from copy import deepcopy
++from functools import wraps
++
++
++def synchronized(method):
++    @wraps(method)
++    def call(self, *args, **kwargs):
++        with self._state_lock:
++            return method(self, *args, **kwargs)
++    return call
++
++
++def settled_once(method):
++    @wraps(method)
++    def call(self, round_id_hex, *args, **kwargs):
++        with self._state_lock:
++            if round_id_hex in self._settled_results:
++                return deepcopy(self._settled_results[round_id_hex])
++            rnd = self.rounds[round_id_hex]
++            if rnd.status != "open":
++                raise ValueError("round is not open; settlement needs reconciliation")
++            result = method(self, round_id_hex, *args, **kwargs)
++            self._settled_results[round_id_hex] = deepcopy(result)
++            return result
++    return call
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..4fbd9e5
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,4 @@
++fastapi==0.141.1
++uvicorn[standard]==0.52.4
++blspy==2.0.3
++protobuf==7.36.1
+diff --git a/scripts_backup_canasino.sh b/scripts_backup_canasino.sh
+index d4afe85..e604548 100755
+--- a/scripts_backup_canasino.sh
++++ b/scripts_backup_canasino.sh
+@@ -3,6 +3,7 @@
+ # Local-only (protects against corruption/accidental deletion/bad deploy);
+ # off-box replication (protects against total VM loss) is a separate step.
+ set -euo pipefail
++umask 077
+ ROOT=/home/ubuntu/canasino
+ OUT="$ROOT/backups"
+ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+diff --git a/tests/test_audit_security.py b/tests/test_audit_security.py
+new file mode 100644
+index 0000000..3caf480
+--- /dev/null
++++ b/tests/test_audit_security.py
+@@ -0,0 +1,74 @@
++import concurrent.futures
++import os
++import unittest
++from fastapi.testclient import TestClient
++from starlette.websockets import WebSocketDisconnect
++from gameserver.app import create_app
++from gameserver.db import Store
++from tests.fakes import FakeBridge
++from unittest.mock import patch
++
++
++class SecurityBoundaryTests(unittest.TestCase):
++    def setUp(self):
++        env = patch.dict(os.environ, {'CASINO_ADMIN_TOKEN': 'audit-test-operator'})
++        env.start()
++        self.addCleanup(env.stop)
++        self.store = Store(':memory:')
++        self.bridge = FakeBridge()
++        self.app = create_app(self.bridge, self.store)
++        self.client = TestClient(self.app)
++
++    def tearDown(self):
++        self.client.close()
++        self.store.close()
++
++    def test_every_mutating_endpoint_is_denied_without_operator(self):
++        for route in self.app.routes:
++            if 'POST' not in getattr(route, 'methods', set()):
++                continue
++            path = route.path.replace('{rid}', 'ab'*8).replace('{address}', 'ab'*20)
++            with self.subTest(path=path):
++                response = self.client.post(path, json={'address':'ab'*20,'action':'fold','amount':1})
++                self.assertEqual(response.status_code, 401)
++        self.assertEqual(self.bridge.balances, {})
++
++    def test_private_hands_and_cards_cannot_be_read_by_address(self):
++        for path in ['/rounds/a/card','/poker/rounds/a/hand','/domino/rounds/a/hand']:
++            self.assertEqual(self.client.get(path, params={'address':'ab'*20}).status_code, 401)
++
++    def test_sockets_cannot_drive_settlement_anonymously(self):
++        for path in ['/ws/rounds/a','/ws/roulette/a','/ws/domino/a','/ws/poker/a','/ws/rounds/a/chat']:
++            with self.assertRaises(WebSocketDisconnect):
++                with self.client.websocket_connect(path):
++                    self.fail('anonymous connection accepted')
++
++    def test_read_only_capabilities_and_operator_validation(self):
++        self.assertFalse(self.client.get('/capabilities').json()['real_money_enabled'])
++        self.assertEqual(self.client.get('/rooms').status_code,200)
++        headers={'Authorization':'Bearer audit-test-operator'}
++        response=self.client.post('/rounds',headers=headers,json={'room':'classic'})
++        self.assertEqual(response.status_code,200)
++        self.assertIsNone(self.client.get('/rounds/'+response.json()['roundId']+'/proof').json()['seed'])
++        self.assertEqual(self.client.post('/rounds',headers=headers,content='a'*17000).status_code,413)
++        self.assertEqual(self.client.post('/rounds',headers={'Authorization':'Bearer wrong'},json={'room':'classic'}).status_code,401)
++        self.assertEqual(self.client.get('/leaderboard?limit=100000').status_code,422)
++
++    def test_settlement_is_immutable_and_counted_once_concurrently(self):
++        def record(_):
++            self.store.record_settle('round','classic',100,1000,{'a':90},'tx', ['a'])
++        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
++            list(pool.map(record,range(32)))
++        self.store.record_settle('round','classic',100,1000,{'a':999},'other', ['a'])
++        self.assertEqual(self.store.stats_for('a')['gamesPlayed'],1)
++        self.assertEqual(self.store.stats_for('a')['totalWon'],90)
++        self.assertEqual(self.store.history_for('a')[0]['txHash'],'tx')
++
++    def test_failed_stats_update_rolls_back_history(self):
++        self.store._conn.execute("CREATE TRIGGER fail_stats BEFORE INSERT ON player_stats BEGIN SELECT RAISE(ABORT, 'test'); END")
++        with self.assertRaises(Exception):
++            self.store.record_settle('round','classic',100,1000,{'a':90},'tx')
++        self.assertEqual(self.store.history_for('a'),[])
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_gameserver_app.py b/tests/test_gameserver_app.py
+index 39eef5c..7baec90 100644
+--- a/tests/test_gameserver_app.py
++++ b/tests/test_gameserver_app.py
+@@ -22,14 +22,17 @@ from .fakes import FakeBridge
+ 
+ class AppTestCase(unittest.TestCase):
+     def setUp(self):
++        os.environ["CASINO_ADMIN_TOKEN"] = "test-admin-token"
+         fd, self.db_path = tempfile.mkstemp(suffix=".db")
+         os.close(fd)
+         os.remove(self.db_path)
+ 
+         self.app = create_app(bridge=FakeBridge(), store=Store(self.db_path))
+-        self.client = TestClient(self.app)
++        self.client = TestClient(self.app, headers={"Authorization": "Bearer test-admin-token"})
+ 
+     def tearDown(self):
++        self.client.close()
++        self.app.state.store.close()
+         for suffix in ("", "-wal", "-shm"):
+             p = self.db_path + suffix
+             if os.path.exists(p):
+@@ -43,16 +46,16 @@ class TestAdminGating(AppTestCase):
+     /gems/topup, which has no legitimate player-facing use, is admin-only."""
+ 
+     def test_gems_topup_without_token_is_rejected(self):
+-        resp = self.client.post("/players/deadbeef/gems/topup", json={"amount": 200})
++        resp = self.client.post("/players/deadbeef/gems/topup", json={"amount": 200}, headers={"Authorization": ""})
+         self.assertEqual(resp.status_code, 401)
+ 
+     def test_gems_topup_with_wrong_token_is_rejected(self):
+-        resp = self.client.post("/players/deadbeef/gems/topup", json={"amount": 200},
++        resp = self.client.post("/players/abababababababababababababababababababab/gems/topup", json={"amount": 200},
+                                 headers={"Authorization": "Bearer wrong"})
+         self.assertEqual(resp.status_code, 401)
+ 
+     def test_gems_topup_with_correct_token_succeeds(self):
+-        resp = self.client.post("/players/deadbeef/gems/topup", json={"amount": 200},
++        resp = self.client.post("/players/abababababababababababababababababababab/gems/topup", json={"amount": 200},
+                                 headers={"Authorization": "Bearer test-admin-token"})
+         self.assertEqual(resp.status_code, 200)
+ 
+@@ -61,9 +64,9 @@ class TestCreateRoundEconomics(AppTestCase):
+     """The actual fix from today's audit: a player may start a round for a
+     known template, but never dictate its economics."""
+ 
+-    def test_room_creation_is_open_to_anyone(self):
+-        resp = self.client.post("/rounds", json={"room": "classic"})
+-        self.assertEqual(resp.status_code, 200)
++    def test_room_creation_requires_operator(self):
++        resp = self.client.post("/rounds", json={"room": "classic"}, headers={"Authorization": ""})
++        self.assertEqual(resp.status_code, 401)
+ 
+     def test_client_supplied_economics_are_ignored(self):
+         resp = self.client.post("/rounds", json={
+@@ -109,8 +112,8 @@ class TestJoinAndRegister(AppTestCase):
+         create = self.client.post("/rounds", json={"room": "classic"},
+                                   headers={"Authorization": "Bearer test-admin-token"})
+         rid = create.json()["roundId"]
+-        resp = self.client.post(f"/rounds/{rid}/register", json={"address": "0xABCDEF", "num_cards": 1})
+-        self.assertEqual(resp.json()["player"], "0xabcdef")
++        resp = self.client.post(f"/rounds/{rid}/register", json={"address": "AB" * 20, "num_cards": 1})
++        self.assertEqual(resp.json()["player"], "ab" * 20)
+ 
+ 
+ class TestRoundCreationRateLimit(AppTestCase):
+diff --git a/tests/test_gameserver_db.py b/tests/test_gameserver_db.py
+index e741566..57ae0f1 100644
+--- a/tests/test_gameserver_db.py
++++ b/tests/test_gameserver_db.py
+@@ -24,6 +24,7 @@ class StoreTestCase(unittest.TestCase):
+         self.store = Store(self.path)
+ 
+     def tearDown(self):
++        self.store.close()
+         if os.path.exists(self.path):
+             os.remove(self.path)
+         for ext in ("-wal", "-shm"):
+diff --git a/tests/test_gameserver_domino_app.py b/tests/test_gameserver_domino_app.py
+index 3f0c2bf..bba9cdd 100644
+--- a/tests/test_gameserver_domino_app.py
++++ b/tests/test_gameserver_domino_app.py
+@@ -18,14 +18,17 @@ from .fakes import FakeBridge
+ 
+ class AppTestCase(unittest.TestCase):
+     def setUp(self):
++        os.environ["CASINO_ADMIN_TOKEN"] = "test-admin-token"
+         fd, self.db_path = tempfile.mkstemp(suffix=".db")
+         os.close(fd)
+         os.remove(self.db_path)
+ 
+         self.app = create_app(bridge=FakeBridge(), store=Store(self.db_path))
+-        self.client = TestClient(self.app)
++        self.client = TestClient(self.app, headers={"Authorization": "Bearer test-admin-token"})
+ 
+     def tearDown(self):
++        self.client.close()
++        self.app.state.store.close()
+         for suffix in ("", "-wal", "-shm"):
+             p = self.db_path + suffix
+             if os.path.exists(p):
+@@ -102,8 +105,8 @@ class TestJoinAndRegister(AppTestCase):
+ 
+     def test_register_lowercases_the_address(self):
+         rid = self.client.post("/domino/rounds").json()["roundId"]
+-        resp = self.client.post(f"/domino/rounds/{rid}/register", json={"address": "0xABCDEF"})
+-        self.assertEqual(resp.json()["player"], "0xabcdef")
++        resp = self.client.post(f"/domino/rounds/{rid}/register", json={"address": "AB" * 20})
++        self.assertEqual(resp.json()["player"], "ab" * 20)
+ 
+ 
+ class TestMoveValidation(AppTestCase):
+diff --git a/tests/test_gameserver_poker_app.py b/tests/test_gameserver_poker_app.py
+index 9296af6..a5ba254 100644
+--- a/tests/test_gameserver_poker_app.py
++++ b/tests/test_gameserver_poker_app.py
+@@ -18,14 +18,17 @@ from .fakes import FakeBridge
+ 
+ class AppTestCase(unittest.TestCase):
+     def setUp(self):
++        os.environ["CASINO_ADMIN_TOKEN"] = "test-admin-token"
+         fd, self.db_path = tempfile.mkstemp(suffix=".db")
+         os.close(fd)
+         os.remove(self.db_path)
+ 
+         self.app = create_app(bridge=FakeBridge(), store=Store(self.db_path))
+-        self.client = TestClient(self.app)
++        self.client = TestClient(self.app, headers={"Authorization": "Bearer test-admin-token"})
+ 
+     def tearDown(self):
++        self.client.close()
++        self.app.state.store.close()
+         for suffix in ("", "-wal", "-shm"):
+             p = self.db_path + suffix
+             if os.path.exists(p):
+@@ -87,8 +90,8 @@ class TestJoinAndRegister(AppTestCase):
+ 
+     def test_register_lowercases_the_address(self):
+         rid = self.client.post("/poker/rounds").json()["roundId"]
+-        resp = self.client.post(f"/poker/rounds/{rid}/register", json={"address": "0xABCDEF"})
+-        self.assertEqual(resp.json()["player"], "0xabcdef")
++        resp = self.client.post(f"/poker/rounds/{rid}/register", json={"address": "AB" * 20})
++        self.assertEqual(resp.json()["player"], "ab" * 20)
+ 
+ 
+ class TestActionValidation(AppTestCase):
+diff --git a/tests/test_gameserver_roulette_app.py b/tests/test_gameserver_roulette_app.py
+index d0d9b9e..9140c31 100644
+--- a/tests/test_gameserver_roulette_app.py
++++ b/tests/test_gameserver_roulette_app.py
+@@ -18,14 +18,17 @@ from .fakes import FakeBridge
+ 
+ class AppTestCase(unittest.TestCase):
+     def setUp(self):
++        os.environ["CASINO_ADMIN_TOKEN"] = "test-admin-token"
+         fd, self.db_path = tempfile.mkstemp(suffix=".db")
+         os.close(fd)
+         os.remove(self.db_path)
+ 
+         self.app = create_app(bridge=FakeBridge(), store=Store(self.db_path))
+-        self.client = TestClient(self.app)
++        self.client = TestClient(self.app, headers={"Authorization": "Bearer test-admin-token"})
+ 
+     def tearDown(self):
++        self.client.close()
++        self.app.state.store.close()
+         for suffix in ("", "-wal", "-shm"):
+             p = self.db_path + suffix
+             if os.path.exists(p):
+@@ -99,8 +102,8 @@ class TestRouletteRegister(AppTestCase):
+     def test_register_lowercases_the_address(self):
+         rid = self.client.post("/roulette/rounds").json()["roundId"]
+         resp = self.client.post(f"/roulette/rounds/{rid}/register",
+-                                json={"address": "0xABCDEF", "bet_type": "black", "amount": ROULETTE_MIN_BET})
+-        self.assertEqual(resp.json()["player"], "0xabcdef")
++                                json={"address": "AB" * 20, "bet_type": "black", "amount": ROULETTE_MIN_BET})
++        self.assertEqual(resp.json()["player"], "ab" * 20)
+ 
+     def test_register_also_validates_the_bet(self):
+         rid = self.client.post("/roulette/rounds").json()["roundId"]

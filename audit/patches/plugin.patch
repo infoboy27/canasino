@@ -1,0 +1,757 @@
+diff --git a/plugin/python/Makefile b/plugin/python/Makefile
+index 9106452f..649ad2f5 100644
+--- a/plugin/python/Makefile
++++ b/plugin/python/Makefile
+@@ -31,21 +31,21 @@ test-unit: dev
+ 	$(VENV_DIR)/bin/pytest
+ 
+ test-cov: dev
+-	$(VENV_DIR)/bin/pytest --cov=plugin --cov-report=html --cov-report=term
++	$(VENV_DIR)/bin/pytest --cov=contract --cov-report=html --cov-report=term
+ 
+ test-verbose: dev
+ 	$(VENV_DIR)/bin/pytest -v
+ 
+ # Code quality
+ lint: venv
+-	$(VENV_DIR)/bin/flake8 plugin/ tests/
++	$(VENV_DIR)/bin/flake8 contract/ tests/
+ 
+ format: venv
+-	$(VENV_DIR)/bin/black plugin/ tests/
+-	$(VENV_DIR)/bin/isort plugin/ tests/
++	$(VENV_DIR)/bin/black contract/ tests/
++	$(VENV_DIR)/bin/isort contract/ tests/
+ 
+ type-check: venv
+-	$(VENV_DIR)/bin/mypy plugin/
++	$(VENV_DIR)/bin/mypy contract/
+ 
+ # Protobuf generation
+ proto: venv
+diff --git a/plugin/python/contract/contract.py b/plugin/python/contract/contract.py
+index 4cac30a0..58e5d2ed 100644
+--- a/plugin/python/contract/contract.py
++++ b/plugin/python/contract/contract.py
+@@ -620,6 +620,7 @@ class Contract:
+ 
+     async def _deliver_message_send(self, msg: MessageSend, fee: int, memo: str) -> PluginDeliverResponse:
+         """DeliverMessageSend handles a 'send' message."""
++        self._check_message_send(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+ 
+@@ -759,6 +760,7 @@ class Contract:
+ 
+     async def _deliver_message_faucet(self, msg: MessageFaucet) -> PluginDeliverResponse:
+         """Mint tokens to recipient (no balance check, no fee) and track a Faucet record."""
++        self._check_message_faucet(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         acct_qid = random.randint(0, 2**53)
+@@ -804,6 +806,7 @@ class Contract:
+ 
+     async def _deliver_message_reward(self, msg: MessageReward, fee: int) -> PluginDeliverResponse:
+         """Admin pays the fee; mint tokens to recipient and track a Reward record."""
++        self._check_message_reward(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         admin_qid = random.randint(0, 2**53)
+@@ -871,6 +874,8 @@ class Contract:
+     def _check_message_open_room(self, msg) -> PluginCheckResponse:
+         if len(msg.operator_address) != 20:
+             raise err_invalid_address()
++        if msg.operator_address not in ADMIN_ADDRESSES:
++            raise err_unauthorized_signer()
+         if not msg.round_id:
+             raise PluginError(1, "plugin", "empty round_id")
+         if len(msg.commitment) != 32:
+@@ -881,6 +886,8 @@ class Contract:
+             raise PluginError(1, "plugin", "rake_bps must be <= 10000")
+         if len(msg.payout_weights_bps) > 0 and sum(msg.payout_weights_bps) != 10000:
+             raise PluginError(1, "plugin", "payout_weights_bps must sum to 10000")
++        if any(w == 0 for w in msg.payout_weights_bps):
++            raise PluginError(1, "plugin", "payout weights must be positive")
+         r = PluginCheckResponse()
+         r.authorized_signers.append(msg.operator_address)
+         return r
+@@ -905,6 +912,10 @@ class Contract:
+             raise PluginError(1, "plugin", "empty round_id")
+         if not msg.seed:
+             raise PluginError(1, "plugin", "empty seed")
++        # The current round schema does not commit a pattern at open. Allowing
++        # an operator to choose it after seeing the deal changes the winner.
++        if msg.pattern not in ("", "line"):
++            raise PluginError(1, "plugin", "round pattern is fixed to line")
+         r = PluginCheckResponse()
+         r.authorized_signers.append(msg.operator_address)
+         return r
+@@ -922,6 +933,7 @@ class Contract:
+         return r
+ 
+     async def _deliver_message_open_room(self, msg, height: int = 0) -> PluginDeliverResponse:
++        self._check_message_open_room(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_round(msg.round_id)
+@@ -953,6 +965,7 @@ class Contract:
+         within ROOM_EXPIRY_BLOCKS. Each participant gets back exactly what
+         their own RoomParticipant record says they put in -- not a recomputed
+         guess -- so this can't over- or under-pay regardless of who calls it."""
++        self._check_message_expire_room(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_round(msg.round_id)
+@@ -997,6 +1010,8 @@ class Contract:
+                 continue
+             acct_bytes = by_qid.get(acct_qids[addr])
+             acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
++            if acct.amount > UINT64_MAX - amount:
++                raise err_invalid_amount()
+             acct.amount += amount
+             total_refunded += amount
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+@@ -1015,6 +1030,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_message_join_room(self, msg) -> PluginDeliverResponse:
++        self._check_message_join_room(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_round(msg.round_id)
+@@ -1047,8 +1063,13 @@ class Contract:
+             raise PluginError(1, "plugin", "round not open")
+         if pb:
+             raise PluginError(1, "plugin", "player already joined")
++        expected = rr.entry_fee * gecon.CARD_COST_MULTIPLIER_BPS[msg.num_cards] // 10000
++        if msg.amount != expected:
++            raise PluginError(1, "plugin", "amount must equal the round's card entry cost")
+         player = unmarshal(Account, plb) if plb else Account()
+         escrow = unmarshal(Account, eb) if eb else Account()
++        if escrow.amount > UINT64_MAX - msg.amount or rr.escrow_total > UINT64_MAX - msg.amount:
++            raise err_invalid_amount()
+         if player.amount < msg.amount:
+             raise err_insufficient_funds()
+         player.amount -= msg.amount
+@@ -1077,6 +1098,7 @@ class Contract:
+         """Trustless settle: operator only reveals the seed. The plugin recomputes
+         every participant's cards from the seed, ranks the winners by who completes
+         the pattern first, and pays the top ranks by the round's payout weights."""
++        self._check_message_settle_room(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_round(msg.round_id)
+@@ -1144,11 +1166,16 @@ class Contract:
+         if escrow.amount < total:
+             raise PluginError(1, "plugin", "escrow underfunded")
+         escrow.amount -= total
++        if treasury.amount > UINT64_MAX - rake:
++            raise err_invalid_amount()
+         treasury.amount += rake
+         sets = [PluginSetOp(key=escrow_key, value=marshal(escrow)),
+                 PluginSetOp(key=treasury_key, value=marshal(treasury))]
+         for i, (q, addr) in enumerate(winner_qids):
+-            acct = unmarshal(Account, by_qid.get(q)) if by_qid.get(q) else Account()
++            acct = treasury if addr == TREASURY_ADDRESS else (
++                unmarshal(Account, by_qid.get(q)) if by_qid.get(q) else Account())
++            if acct.amount > UINT64_MAX - payouts[i]:
++                raise err_invalid_amount()
+             acct.amount += payouts[i]
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+         rr.status = 1
+@@ -1216,6 +1243,7 @@ class Contract:
+         return r
+ 
+     async def _deliver_message_open_roulette(self, msg, height: int = 0) -> PluginDeliverResponse:
++        self._check_message_open_roulette(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_roulette_round(msg.round_id)
+@@ -1240,6 +1268,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_message_roulette_bet(self, msg) -> PluginDeliverResponse:
++        self._check_message_roulette_bet(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_roulette_round(msg.round_id)
+@@ -1306,6 +1335,7 @@ class Contract:
+         their own bet's odds; whatever the escrow doesn't pay out (losing
+         stakes) plus the rake skimmed off winning payouts both go to the
+         treasury, so escrow always ends a settle at exactly zero."""
++        self._check_message_settle_roulette(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_roulette_round(msg.round_id)
+@@ -1363,7 +1393,10 @@ class Contract:
+             rake = gross * rr.rake_bps // 10000
+             net = gross - rake
+             acct_bytes = by_qid.get(acct_qids[addr])
+-            acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
++            acct = treasury if addr == TREASURY_ADDRESS else (
++                unmarshal(Account, acct_bytes) if acct_bytes else Account())
++            if acct.amount > UINT64_MAX - net:
++                raise err_invalid_amount()
+             acct.amount += net
+             total_gross_to_winners += gross
+             total_rake += rake
+@@ -1378,11 +1411,15 @@ class Contract:
+         # rather than paying out from nothing.
+         if escrow.amount >= total_gross_to_winners:
+             house_take = escrow.amount - total_gross_to_winners  # losing stakes -> pure house profit
++            if treasury.amount > UINT64_MAX - total_rake - house_take:
++                raise err_invalid_amount()
+             treasury.amount += total_rake + house_take
+         else:
+             shortfall = total_gross_to_winners - escrow.amount
+-            if treasury.amount < shortfall:
++            if treasury.amount + total_rake < shortfall:
+                 raise PluginError(1, "plugin", "treasury underfunded to cover payout")
++            if treasury.amount + total_rake - shortfall > UINT64_MAX:
++                raise err_invalid_amount()
+             treasury.amount += total_rake - shortfall
+         escrow.amount = 0
+         sets.append(PluginSetOp(key=escrow_key, value=marshal(escrow)))
+@@ -1403,6 +1440,7 @@ class Contract:
+         """Refund every escrowed bet for a round the operator never settled
+         within ROOM_EXPIRY_BLOCKS. Each bettor gets back exactly what their own
+         RouletteBetRecord says they staked -- not a recomputed guess."""
++        self._check_message_expire_roulette(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_roulette_round(msg.round_id)
+@@ -1447,6 +1485,8 @@ class Contract:
+                 continue
+             acct_bytes = by_qid.get(acct_qids[addr])
+             acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
++            if acct.amount > UINT64_MAX - amount:
++                raise err_invalid_amount()
+             acct.amount += amount
+             total_refunded += amount
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+@@ -1520,6 +1560,7 @@ class Contract:
+         return r
+ 
+     async def _deliver_message_open_domino(self, msg, height: int = 0) -> PluginDeliverResponse:
++        self._check_message_open_domino(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_domino_round(msg.round_id)
+@@ -1545,6 +1586,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_message_join_domino(self, msg) -> PluginDeliverResponse:
++        self._check_message_join_domino(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_domino_round(msg.round_id)
+@@ -1603,6 +1645,7 @@ class Contract:
+         here to also validate the moves since domino's outcome depends on
+         player choices, not just the seed. An illegal move anywhere in the
+         claimed log rejects the whole settle -- there is no partial credit."""
++        self._check_message_settle_domino(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_domino_round(msg.round_id)
+@@ -1664,11 +1707,16 @@ class Contract:
+         if escrow.amount < total:
+             raise PluginError(1, "plugin", "escrow underfunded")
+         escrow.amount -= total
++        if treasury.amount > UINT64_MAX - rake:
++            raise err_invalid_amount()
+         treasury.amount += rake
+         sets = [PluginSetOp(key=escrow_key, value=marshal(escrow)),
+                 PluginSetOp(key=treasury_key, value=marshal(treasury))]
+         for i, (q, addr) in enumerate(winner_qids):
+-            acct = unmarshal(Account, by_qid.get(q)) if by_qid.get(q) else Account()
++            acct = treasury if addr == TREASURY_ADDRESS else (
++                unmarshal(Account, by_qid.get(q)) if by_qid.get(q) else Account())
++            if acct.amount > UINT64_MAX - payouts[i]:
++                raise err_invalid_amount()
+             acct.amount += payouts[i]
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+ 
+@@ -1688,6 +1736,7 @@ class Contract:
+         """Refund every escrowed entry fee for a round the operator never
+         settled within ROOM_EXPIRY_BLOCKS -- including a round that only ever
+         got one participant (that one address is simply refunded alone)."""
++        self._check_message_expire_domino(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_domino_round(msg.round_id)
+@@ -1724,6 +1773,8 @@ class Contract:
+         for addr in participants:
+             acct_bytes = by_qid.get(acct_qids[addr])
+             acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
++            if acct.amount > UINT64_MAX - rr.entry_fee:
++                raise err_invalid_amount()
+             acct.amount += rr.entry_fee
+             total_refunded += rr.entry_fee
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+@@ -1799,6 +1850,7 @@ class Contract:
+         return r
+ 
+     async def _deliver_message_open_poker(self, msg, height: int = 0) -> PluginDeliverResponse:
++        self._check_message_open_poker(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_poker_round(msg.round_id)
+@@ -1826,6 +1878,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_message_join_poker(self, msg) -> PluginDeliverResponse:
++        self._check_message_join_poker(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_poker_round(msg.round_id)
+@@ -1885,6 +1938,7 @@ class Contract:
+         Domino's even pari-mutuel split, poker's payout must account for
+         chips a participant never put in (stacks_remaining, always returned
+         untaxed) alongside a rake taken only from the actually-contested pot."""
++        self._check_message_settle_poker(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_poker_round(msg.round_id)
+@@ -1946,11 +2000,16 @@ class Contract:
+         if escrow.amount < rr.escrow_total:
+             raise PluginError(1, "plugin", "escrow underfunded")
+         escrow.amount -= rr.escrow_total
++        if treasury.amount > UINT64_MAX - rake:
++            raise err_invalid_amount()
+         treasury.amount += rake
+         sets = [PluginSetOp(key=escrow_key, value=marshal(escrow)),
+                 PluginSetOp(key=treasury_key, value=marshal(treasury))]
+         for q, addr in participant_qids:
+-            acct = unmarshal(Account, by_qid.get(q)) if by_qid.get(q) else Account()
++            acct = treasury if addr == TREASURY_ADDRESS else (
++                unmarshal(Account, by_qid.get(q)) if by_qid.get(q) else Account())
++            if acct.amount > UINT64_MAX - final_payouts[addr]:
++                raise err_invalid_amount()
+             acct.amount += final_payouts[addr]
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+ 
+@@ -1971,6 +2030,7 @@ class Contract:
+         settled within ROOM_EXPIRY_BLOCKS -- including a round that only
+         ever got one participant (that one address is simply refunded
+         alone)."""
++        self._check_message_expire_poker(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         round_key = key_for_poker_round(msg.round_id)
+@@ -2007,6 +2067,8 @@ class Contract:
+         for addr in participants:
+             acct_bytes = by_qid.get(acct_qids[addr])
+             acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
++            if acct.amount > UINT64_MAX - rr.buy_in:
++                raise err_invalid_amount()
+             acct.amount += rr.buy_in
+             total_refunded += rr.buy_in
+             sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
+@@ -2063,6 +2125,7 @@ class Contract:
+         return val, None
+ 
+     async def _deliver_buy_coins(self, msg):
++        self._check_mint_like(msg.admin_address, msg.recipient_address, msg.amount)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         key = key_for_account(msg.recipient_address)
+@@ -2081,6 +2144,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_buy_gems(self, msg):
++        self._check_mint_like(msg.admin_address, msg.recipient_address, msg.amount)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         key = key_for_gems(msg.recipient_address)
+@@ -2100,6 +2164,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_transfer_gems(self, msg):
++        self._check_transfer_gems(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         from_key = key_for_gems(msg.from_address)
+@@ -2147,6 +2212,8 @@ class Contract:
+             raise PluginError(1, "plugin", "empty token_id")
+         if not msg.kind:
+             raise PluginError(1, "plugin", "empty kind")
++        if msg.operator_address not in ADMIN_ADDRESSES:
++            raise err_unauthorized_signer()
+         r = PluginCheckResponse()
+         r.recipient = msg.owner_address
+         r.authorized_signers.append(msg.operator_address)
+@@ -2174,6 +2241,7 @@ class Contract:
+         return r
+ 
+     async def _deliver_mint_cosmetic(self, msg):
++        self._check_mint_cosmetic(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         key = key_for_cosmetic(msg.token_id)
+@@ -2194,6 +2262,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_buy_cosmetic(self, msg):
++        self._check_buy_cosmetic(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         # price comes from the SHARED economy catalog (must be a gem-priced item)
+@@ -2240,6 +2309,7 @@ class Contract:
+         return out
+ 
+     async def _deliver_transfer_cosmetic(self, msg):
++        self._check_transfer_cosmetic(msg)
+         if not self.plugin or not self.config:
+             raise PluginError(1, "plugin", "plugin or config not initialized")
+         key = key_for_cosmetic(msg.token_id)
+diff --git a/plugin/python/contract/game/economy.py b/plugin/python/contract/game/economy.py
+index 85129345..fcaa11e6 100644
+--- a/plugin/python/contract/game/economy.py
++++ b/plugin/python/contract/game/economy.py
+@@ -40,14 +40,24 @@ COIN_DECIMALS = 6
+ GEM_DECIMALS = 0
+ 
+ 
++def _nonnegative_integer(value: int, name: str) -> None:
++    if type(value) is not int or value < 0:
++        raise ValueError(f"{name} must be a non-negative integer")
++
++
+ def to_base_units(amount: int, currency: Currency) -> int:
+     """Display units -> on-chain uint64 base units."""
++    _nonnegative_integer(amount, "amount")
+     decimals = COIN_DECIMALS if currency == Currency.COINS else GEM_DECIMALS
+-    return int(amount) * (10 ** decimals)
++    result = amount * (10 ** decimals)
++    if result > (1 << 64) - 1:
++        raise ValueError("amount exceeds uint64 base units")
++    return result
+ 
+ 
+ def from_base_units(base: int, currency: Currency) -> int:
+     """On-chain base units -> whole display units (floor)."""
++    _nonnegative_integer(base, "base")
+     decimals = COIN_DECIMALS if currency == Currency.COINS else GEM_DECIMALS
+     return int(base) // (10 ** decimals)
+ 
+@@ -149,7 +159,7 @@ def card_selection(room_id: str) -> list[dict]:
+ 
+ 
+ def _validate_card_count(num_cards: int) -> None:
+-    if num_cards not in CARD_COST_MULTIPLIER_BPS:
++    if type(num_cards) is not int or num_cards not in CARD_COST_MULTIPLIER_BPS:
+         raise ValueError(f"num_cards must be {MIN_CARDS}..{MAX_CARDS}, got {num_cards}")
+ 
+ 
+@@ -160,13 +170,15 @@ def _validate_card_count(num_cards: int) -> None:
+ 
+ def prize_pool(entries: Sequence[int]) -> int:
+     """Gross pool = every entry fee collected for the room."""
+-    if any(e < 0 for e in entries):
+-        raise ValueError("entry amounts must be non-negative")
++    for entry in entries:
++        _nonnegative_integer(entry, "entry amount")
+     return sum(entries)
+ 
+ 
+ def apply_rake(gross_pool: int, rake_bps: int) -> tuple[int, int]:
+     """Split a gross pool into (net_to_players, house_take)."""
++    _nonnegative_integer(gross_pool, "gross_pool")
++    _nonnegative_integer(rake_bps, "rake_bps")
+     if not 0 <= rake_bps <= 10_000:
+         raise ValueError("rake_bps must be 0..10000")
+     house = gross_pool * rake_bps // 10_000
+@@ -179,6 +191,9 @@ def distribute(net_pool: int, weights_bps: Sequence[int]) -> list[int]:
+     Integer division; any rounding remainder goes to the top rank so the sum of
+     payouts always equals ``net_pool`` exactly (no coins created or lost).
+     """
++    _nonnegative_integer(net_pool, "net_pool")
++    if not weights_bps or any(type(w) is not int or w <= 0 for w in weights_bps):
++        raise ValueError("payout weights must be positive integers")
+     if sum(weights_bps) != 10_000:
+         raise ValueError("payout weights must sum to 10000 bps")
+     payouts = [net_pool * w // 10_000 for w in weights_bps]
+@@ -371,15 +386,19 @@ class Balance:
+     xp: int = 0
+ 
+     def can_afford(self, currency: Currency, amount: int) -> bool:
++        _nonnegative_integer(amount, "amount")
+         return getattr(self, currency.value) >= amount
+ 
+     def credit(self, reward: Reward) -> "Balance":
++        for amount in (reward.coins, reward.gems, reward.xp):
++            _nonnegative_integer(amount, "reward amount")
+         self.coins += reward.coins
+         self.gems += reward.gems
+         self.xp += reward.xp
+         return self
+ 
+     def debit(self, currency: Currency, amount: int) -> "Balance":
++        _nonnegative_integer(amount, "amount")
+         if amount < 0:
+             raise ValueError("cannot debit a negative amount")
+         if not self.can_afford(currency, amount):
+diff --git a/plugin/python/main.py b/plugin/python/main.py
+index 65e78bbc..e5766b9f 100644
+--- a/plugin/python/main.py
++++ b/plugin/python/main.py
+@@ -36,5 +36,10 @@ async def main() -> None:
+     await plugin.close()
+ 
+ 
+-if __name__ == "__main__":
++def cli() -> None:
++    """Synchronous console-script entry point."""
+     asyncio.run(main())
++
++
++if __name__ == "__main__":
++    cli()
+diff --git a/plugin/python/pyproject.toml b/plugin/python/pyproject.toml
+index 803550a7..cee8ebc2 100644
+--- a/plugin/python/pyproject.toml
++++ b/plugin/python/pyproject.toml
+@@ -64,14 +64,17 @@ Repository = "https://github.com/canopy/canopy-plugin-python.git"
+ Issues = "https://github.com/canopy/canopy-plugin-python/issues"
+ 
+ [project.scripts]
+-canopy-plugin = "plugin.main:main"
++canopy-plugin = "main:cli"
+ 
+ [tool.setuptools.packages.find]
+ where = ["."]
+-include = ["plugin*"]
++include = ["contract*"]
++
++[tool.setuptools]
++py-modules = ["main"]
+ 
+ [tool.setuptools.package-data]
+-plugin = ["py.typed", "proto/*.proto"]
++contract = ["py.typed", "proto/*.proto"]
+ 
+ [tool.black]
+ line-length = 88
+@@ -141,7 +144,7 @@ markers = [
+ asyncio_mode = "auto"
+ 
+ [tool.coverage.run]
+-source = ["plugin"]
++source = ["contract"]
+ omit = [
+     "*/tests/*",
+     "*/proto/*",
+diff --git a/plugin/python/tests/test_audit_financial.py b/plugin/python/tests/test_audit_financial.py
+new file mode 100644
+index 00000000..3a941afc
+--- /dev/null
++++ b/plugin/python/tests/test_audit_financial.py
+@@ -0,0 +1,135 @@
++import pytest
++from tests.test_room_lifecycle import (
++    FakeState, Contract, Config, open_room, join_room, run, ADMIN,
++    PLAYER_A, SEED, seed_commitment, MessageJoinRoom, MessageSettleRoom,
++    PluginError, escrow_address, MessageExpireRoom,
++)
++from contract.contract import ADMIN_ADDRESSES, ROOM_EXPIRY_BLOCKS, UINT64_MAX
++from contract.contract import TREASURY_ADDRESS, roulette_escrow_address
++from contract.game.roulette import spin_number
++from contract.proto.tx_pb2 import (
++    MessageFaucet, MessageMintCosmetic, MessageOpenRoulette,
++    MessageRouletteBet, MessageSettleRoulette,
++)
++from contract.proto.tx_pb2 import MessageOpenPoker, MessageJoinPoker, MessageSettlePoker, PokerActionRecord
++from contract.proto.tx_pb2 import MessageOpenDomino, MessageJoinDomino, MessageSettleDomino, DominoMoveRecord
++from contract.game.domino import GameEngine, Move
++from contract.contract import domino_escrow_address, poker_escrow_address
++
++@pytest.mark.parametrize('amount', [1,99,101,100000])
++def test_wrong_entry_amount_rejected_without_changing_balance(amount):
++    state=FakeState(); contract=Contract(config=Config(),plugin=state)
++    rid=open_room(contract,entry_fee=100)
++    state.set_balance(PLAYER_A,amount)
++    before=dict(state.kv)
++    with pytest.raises(PluginError,match='entry cost'):
++        run(contract._deliver_message_join_room(MessageJoinRoom(player_address=PLAYER_A,round_id=rid,num_cards=1,amount=amount)))
++    assert state.kv == before
++
++def test_multicard_floor_matches_server_and_duplicate_join_is_rejected():
++    state=FakeState(); contract=Contract(config=Config(),plugin=state)
++    rid=open_room(contract,entry_fee=101)
++    join_room(contract,state,PLAYER_A,rid,181,num_cards=2)
++    assert state.balance(escrow_address(rid)) == 181
++    with pytest.raises(PluginError,match='already joined'):
++        run(contract._deliver_message_join_room(MessageJoinRoom(player_address=PLAYER_A,round_id=rid,num_cards=2,amount=181)))
++
++def test_operator_cannot_choose_a_different_pattern_at_reveal():
++    state=FakeState(); contract=Contract(config=Config(),plugin=state)
++    rid=open_room(contract,commitment=seed_commitment(SEED))
++    join_room(contract,state,PLAYER_A,rid,100)
++    before=dict(state.kv)
++    with pytest.raises(PluginError,match='fixed to line'):
++        run(contract._deliver_message_settle_room(MessageSettleRoom(operator_address=ADMIN,round_id=rid,seed=SEED,pattern='full_house')))
++    assert state.kv == before
++
++def test_only_documented_operator_remains_privileged():
++    assert ADMIN_ADDRESSES == frozenset({bytes.fromhex('fb70ee0f20168be6d3a98f13dcbab09b1ea18c65')})
++
++def test_cosmetic_mint_rejects_non_admin_operator():
++    contract=Contract(config=Config())
++    with pytest.raises(PluginError):
++        contract._check_mint_cosmetic(MessageMintCosmetic(
++            operator_address=PLAYER_A, owner_address=PLAYER_A,
++            token_id=b'audit-token', kind=b'avatar',
++        ))
++
++def test_deliver_revalidates_admin_instead_of_trusting_check_tx():
++    state=FakeState(); contract=Contract(config=Config(),plugin=state)
++    before=dict(state.kv)
++    with pytest.raises(PluginError):
++        run(contract._deliver_message_faucet(MessageFaucet(
++            signer_address=PLAYER_A, recipient_address=PLAYER_A, amount=100,
++        )))
++    assert state.kv == before
++
++def test_expiry_refund_rejects_recipient_overflow_atomically():
++    state=FakeState(); contract=Contract(config=Config(),plugin=state)
++    rid=open_room(contract,entry_fee=100,height=1000)
++    join_room(contract,state,PLAYER_A,rid,100)
++    state.set_balance(PLAYER_A,UINT64_MAX)
++    before=dict(state.kv)
++    with pytest.raises(PluginError):
++        run(contract._deliver_message_expire_room(
++            MessageExpireRoom(caller_address=PLAYER_A,round_id=rid),
++            height=1000 + ROOM_EXPIRY_BLOCKS,
++        ))
++    assert state.kv == before
++
++def test_treasury_as_bingo_winner_preserves_rake_and_net():
++    state=FakeState(); contract=Contract(config=Config(),plugin=state)
++    rid=open_room(contract,commitment=seed_commitment(SEED))
++    join_room(contract,state,TREASURY_ADDRESS,rid,100)
++    run(contract._deliver_message_settle_room(MessageSettleRoom(operator_address=ADMIN,round_id=rid,seed=SEED,pattern='line')))
++    assert state.balance(TREASURY_ADDRESS) == 100
++    assert state.balance(escrow_address(rid)) == 0
++
++@pytest.mark.parametrize('bettor', [PLAYER_A,TREASURY_ADDRESS])
++def test_roulette_settlement_conserves_funds_with_treasury_alias(bettor):
++    state=FakeState(); contract=Contract(config=Config(),plugin=state); rid=b'roulette-audit'
++    state.set_balance(TREASURY_ADDRESS,100000)
++    if bettor != TREASURY_ADDRESS: state.set_balance(bettor,100)
++    initial=sum(state.balance(a) for a in {bettor,TREASURY_ADDRESS})
++    run(contract._deliver_message_open_roulette(MessageOpenRoulette(operator_address=ADMIN,round_id=rid,commitment=seed_commitment(SEED),rake_bps=1000),1000))
++    run(contract._deliver_message_roulette_bet(MessageRouletteBet(player_address=bettor,round_id=rid,bet_type='straight',bet_number=spin_number(SEED),amount=100)))
++    run(contract._deliver_message_settle_roulette(MessageSettleRoulette(operator_address=ADMIN,round_id=rid,seed=SEED)))
++    assert sum(state.balance(a) for a in {bettor,TREASURY_ADDRESS}) == initial
++    assert state.balance(roulette_escrow_address(rid)) == 0
++    with pytest.raises(PluginError,match='already settled'):
++        run(contract._deliver_message_settle_roulette(MessageSettleRoulette(operator_address=ADMIN,round_id=rid,seed=SEED)))
++
++@pytest.mark.parametrize('treasury_seat',[0,1])
++def test_poker_treasury_participant_preserves_payout_and_rake(treasury_seat):
++    state=FakeState(); contract=Contract(config=Config(),plugin=state); rid=b'poker-audit'
++    players=[PLAYER_A,PLAYER_A]; players[treasury_seat]=TREASURY_ADDRESS
++    run(contract._deliver_message_open_poker(MessageOpenPoker(operator_address=ADMIN,round_id=rid,commitment=seed_commitment(SEED),small_blind=10,big_blind=20,buy_in=1000,rake_bps=1000),1000))
++    for player in players:
++        state.set_balance(player,1000)
++        run(contract._deliver_message_join_poker(MessageJoinPoker(player_address=player,round_id=rid,amount=1000)))
++    run(contract._deliver_message_settle_poker(MessageSettlePoker(operator_address=ADMIN,round_id=rid,seed=SEED,actions=[PokerActionRecord(action='fold')])))
++    assert sum(state.balance(a) for a in players) == 2000
++    assert state.balance(poker_escrow_address(rid)) == 0
++
++@pytest.mark.parametrize('treasury_seat',[0,1])
++def test_domino_treasury_participant_preserves_payout_and_rake(treasury_seat):
++    state=FakeState(); contract=Contract(config=Config(),plugin=state); rid=b'domino-audit'
++    players=[PLAYER_A,PLAYER_A]; players[treasury_seat]=TREASURY_ADDRESS
++    run(contract._deliver_message_open_domino(MessageOpenDomino(operator_address=ADMIN,round_id=rid,commitment=seed_commitment(SEED),entry_fee=100,rake_bps=1000),1000))
++    for player in players:
++        state.set_balance(player,100)
++        run(contract._deliver_message_join_domino(MessageJoinDomino(player_address=player,round_id=rid,amount=100)))
++    engine=GameEngine(SEED); moves=[]
++    while not engine.finished:
++        hand=engine.hands[engine.turn]; move=None
++        if engine.ends is None: move=Move(action='play',tile=hand[0])
++        else:
++            for tile in hand:
++                if engine.ends[0] in tile: move=Move(action='play',tile=tile,end='left'); break
++                if engine.ends[1] in tile: move=Move(action='play',tile=tile,end='right'); break
++        if move is None: move=Move(action='draw' if engine.boneyard_idx < len(engine.boneyard) else 'pass')
++        engine.apply_move(move)
++        moves.append(DominoMoveRecord(action=move.action,tile_low=move.tile[0] if move.tile else 0,tile_high=move.tile[1] if move.tile else 0,end=move.end or ''))
++        assert len(moves) < 200
++    run(contract._deliver_message_settle_domino(MessageSettleDomino(operator_address=ADMIN,round_id=rid,seed=SEED,moves=moves)))
++    assert sum(state.balance(a) for a in players) == 200
++    assert state.balance(domino_escrow_address(rid)) == 0
+diff --git a/plugin/python/tests/test_domino_lifecycle.py b/plugin/python/tests/test_domino_lifecycle.py
+index 60ddad6d..6e081691 100644
+--- a/plugin/python/tests/test_domino_lifecycle.py
++++ b/plugin/python/tests/test_domino_lifecycle.py
+@@ -87,7 +87,7 @@ def contract(state):
+ 
+ 
+ def run(coro):
+-    return asyncio.get_event_loop().run_until_complete(coro)
++    return asyncio.run(coro)
+ 
+ 
+ def open_domino(contract, round_id=b"round001", entry_fee=100, rake_bps=1000, height=1000,
+diff --git a/plugin/python/tests/test_poker_lifecycle.py b/plugin/python/tests/test_poker_lifecycle.py
+index 9073e649..598b36d3 100644
+--- a/plugin/python/tests/test_poker_lifecycle.py
++++ b/plugin/python/tests/test_poker_lifecycle.py
+@@ -93,7 +93,7 @@ def contract(state):
+ 
+ 
+ def run(coro):
+-    return asyncio.get_event_loop().run_until_complete(coro)
++    return asyncio.run(coro)
+ 
+ 
+ def open_poker(contract, round_id=b"round001", small_blind=SMALL_BLIND, big_blind=BIG_BLIND,
+diff --git a/plugin/python/tests/test_room_lifecycle.py b/plugin/python/tests/test_room_lifecycle.py
+index 065061e5..e2ec28a0 100644
+--- a/plugin/python/tests/test_room_lifecycle.py
++++ b/plugin/python/tests/test_room_lifecycle.py
+@@ -94,7 +94,7 @@ def contract(state):
+ 
+ 
+ def run(coro):
+-    return asyncio.get_event_loop().run_until_complete(coro)
++    return asyncio.run(coro)
+ 
+ 
+ def open_room(contract, round_id=b"round001", entry_fee=100, rake_bps=1000, height=1000,
+@@ -161,9 +161,9 @@ class TestExpireRoom:
+     def test_refunds_every_participant_after_deadline(self, contract, state):
+         rid = open_room(contract, entry_fee=100, height=1000)
+         join_room(contract, state, PLAYER_A, rid, 100)
+-        join_room(contract, state, PLAYER_B, rid, 100, num_cards=2)
++        join_room(contract, state, PLAYER_B, rid, 180, num_cards=2)
+ 
+-        assert state.balance(escrow_address(rid)) == 200
++        assert state.balance(escrow_address(rid)) == 280
+         assert state.balance(PLAYER_A) == 0  # spent joining
+         assert state.balance(PLAYER_B) == 0
+ 
+@@ -176,7 +176,7 @@ class TestExpireRoom:
+         assert not resp.HasField("error"), resp.error.msg
+ 
+         assert state.balance(PLAYER_A) == 100
+-        assert state.balance(PLAYER_B) == 100
++        assert state.balance(PLAYER_B) == 180
+         assert state.balance(escrow_address(rid)) == 0
+ 
+     def test_cannot_expire_twice(self, contract, state):
+diff --git a/plugin/python/tests/test_roulette_lifecycle.py b/plugin/python/tests/test_roulette_lifecycle.py
+index d60cc162..722bfe98 100644
+--- a/plugin/python/tests/test_roulette_lifecycle.py
++++ b/plugin/python/tests/test_roulette_lifecycle.py
+@@ -102,7 +102,7 @@ def contract(state):
+ 
+ 
+ def run(coro):
+-    return asyncio.get_event_loop().run_until_complete(coro)
++    return asyncio.run(coro)
+ 
+ 
+ def open_roulette(contract, round_id=b"round001", rake_bps=1000, height=1000,
