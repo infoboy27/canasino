@@ -1,6 +1,6 @@
 # Wallet authorization protocol v1
 
-Status: implemented and unit-tested in the frontend/game-server candidates; FleetWallet extension integration and real-chain E2E remain pending.
+Status: implemented and unit-tested in frontend, game-server and FleetWallet candidates; interactive extension and isolated-chain E2E remain pending.
 
 ## Purpose
 
@@ -47,6 +47,12 @@ The extension must sign the exact decoded `messageHex` bytes with Canopy's BLS12
 `POST /auth/verify` derives `SHA256(publicKey)[:20]`, compares that address to the challenge, verifies the BLS signature and atomically consumes the challenge. It returns a cryptographically random opaque grant. Only the SHA-256 token hash is stored.
 
 The grant expires after 90 seconds and is atomically consumed only when address, action, resource and canonical payload hash all match. Failed mismatch attempts do not consume a valid grant. Successful grants cannot be replayed.
+
+Poker and Domino off-chain actions use the same one-use grant. Their exact
+payload includes a UUID, action sequence and `state_hash` for the complete
+prior public game state. Resources are `poker-action:<round>:<sequence>` and
+`domino-move:<round>:<sequence>`. The game manager checks the signed sequence
+and hash while holding the same lock that applies the action.
 
 Wallet-funded registration bodies include a UUID `operation_id` and the normalized 32-byte `tx_hash`. After a grant is consumed, the server persists an operation state machine (`AUTHORIZED` → `PENDING` → `FINALIZED` → `APPLIED`, or terminal `REJECTED`). It accepts the registration only after `/v1/query/tx-by-hash` proves the exact signer, transaction type, network, chain, game fields and required confirmation depth. The same transaction hash cannot back another operation.
 

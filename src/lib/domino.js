@@ -1,5 +1,5 @@
 import { jsonGet, jsonPost, websocket } from './api.js'
-import { walletAuthorizedPost, walletOperation } from './auth.js'
+import { walletAction, walletAuthorizedPost, walletOperation } from './auth.js'
 
 export function openDominoRound() {
   return jsonPost('/domino/rounds')
@@ -27,8 +27,15 @@ export function getDominoHand(roundId, address) {
   return jsonGet(`/domino/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`)
 }
 
-export function postDominoMove(roundId, address, action, tile, end) {
-  return jsonPost(`/domino/rounds/${encodeURIComponent(roundId)}/move`, { address, action, tile: tile || null, end: end || null })
+export function postDominoMove(roundId, address, actionContext, action, tile, end) {
+  const path = `/domino/rounds/${encodeURIComponent(roundId)}/move`
+  const payload = walletAction(address, actionContext, {
+    action, tile: tile || null, end: end || null,
+  })
+  return walletAuthorizedPost({
+    path, account: { address }, action: 'domino_move',
+    resource: `domino-move:${roundId}:${payload.sequence}`, payload,
+  })
 }
 
 export function getDominoProof(roundId) {

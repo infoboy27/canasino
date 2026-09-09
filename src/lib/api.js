@@ -49,7 +49,7 @@ export async function jsonPublicPost(path, body, { timeoutMs = 10000 } = {}) {
   } finally { clearTimeout(timer) }
 }
 
-const WALLET_POST = /^\/(?:rounds\/[a-f0-9]{16}|(?:roulette|domino|poker)\/rounds\/[a-f0-9]{16})\/register$/i
+const WALLET_POST = /^(?:\/(?:rounds\/[a-f0-9]{16}|(?:roulette|domino|poker)\/rounds\/[a-f0-9]{16})\/register|\/domino\/rounds\/[a-f0-9]{16}\/move|\/poker\/rounds\/[a-f0-9]{16}\/action)$/i
 
 export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = {}) {
   requireWagering()

@@ -1,5 +1,5 @@
 import { jsonGet, jsonPost, websocket } from './api.js'
-import { walletAuthorizedPost, walletOperation } from './auth.js'
+import { walletAction, walletAuthorizedPost, walletOperation } from './auth.js'
 
 export function openPokerRound() {
   return jsonPost('/poker/rounds')
@@ -27,8 +27,13 @@ export function getPokerHand(roundId, address) {
   return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`)
 }
 
-export function postPokerAction(roundId, address, action, amount = 0) {
-  return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/action`, { address, action, amount })
+export function postPokerAction(roundId, address, actionContext, action, amount = 0) {
+  const path = `/poker/rounds/${encodeURIComponent(roundId)}/action`
+  const payload = walletAction(address, actionContext, { action, amount })
+  return walletAuthorizedPost({
+    path, account: { address }, action: 'poker_action',
+    resource: `poker-action:${roundId}:${payload.sequence}`, payload,
+  })
 }
 
 export function getPokerProof(roundId) {

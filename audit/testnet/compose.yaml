@@ -1,0 +1,35 @@
+name: canasino-valueless
+
+services:
+  canopy:
+    image: canopy-python@sha256:2340361d755744ef1709832305c67e06b6e3faab7404a75a0229a73e942fd645
+    command: ["/bin/sh", "/opt/canasino/bootstrap.sh"]
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+    volumes:
+      - canopy_valueless_data:/root/.canopy
+      - ./bootstrap.sh:/opt/canasino/bootstrap.sh:ro
+    expose:
+      - "50002"
+      - "50003"
+      - "50010"
+    networks:
+      - valueless
+    labels:
+      org.canasino.purpose: "isolated-valueless-testnet-only"
+      org.canasino.production-data: "forbidden"
+
+networks:
+  valueless:
+    internal: true
+
+volumes:
+  canopy_valueless_data:
+    labels:
+      org.canasino.purpose: "disposable-valueless-testnet-data"

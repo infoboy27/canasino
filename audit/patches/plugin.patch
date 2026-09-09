@@ -30,7 +30,7 @@ index 9106452f..649ad2f5 100644
  # Protobuf generation
  proto: venv
 diff --git a/plugin/python/contract/contract.py b/plugin/python/contract/contract.py
-index 4cac30a0..58e5d2ed 100644
+index 4cac30a0..c6c3b4e9 100644
 --- a/plugin/python/contract/contract.py
 +++ b/plugin/python/contract/contract.py
 @@ -620,6 +620,7 @@ class Contract:
@@ -167,7 +167,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_roulette_round(msg.round_id)
-@@ -1240,6 +1268,7 @@ class Contract:
+@@ -1240,22 +1268,25 @@ class Contract:
          return out
  
      async def _deliver_message_roulette_bet(self, msg) -> PluginDeliverResponse:
@@ -175,7 +175,83 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_roulette_round(msg.round_id)
-@@ -1306,6 +1335,7 @@ class Contract:
+         bet_key = key_for_roulette_bet(msg.round_id, msg.player_address)
+         player_key = key_for_account(msg.player_address)
+         escrow_key = key_for_account(roulette_escrow_address(msg.round_id))
+-        qr, qb, qpl, qe = (random.randint(0, 2**53) for _ in range(4))
++        treasury_key = key_for_account(TREASURY_ADDRESS)
++        qr, qb, qpl, qe, qt = (random.randint(0, 2**53) for _ in range(5))
+         resp = await self.plugin.state_read(self, PluginStateReadRequest(keys=[
+             PluginKeyRead(query_id=qr, key=round_key),
+             PluginKeyRead(query_id=qb, key=bet_key),
+             PluginKeyRead(query_id=qpl, key=player_key),
+             PluginKeyRead(query_id=qe, key=escrow_key),
++            PluginKeyRead(query_id=qt, key=treasury_key),
+         ]))
+         if resp.HasField("error"):
+             out = PluginDeliverResponse(); out.error.CopyFrom(resp.error); return out
+-        rb = bb = plb = eb = None
++        rb = bb = plb = eb = tb = None
+         for r in resp.results:
+             if r.query_id == qr:
+                 rb = r.entries[0].value if r.entries else None
+@@ -1265,6 +1296,8 @@ class Contract:
+                 plb = r.entries[0].value if r.entries else None
+             elif r.query_id == qe:
+                 eb = r.entries[0].value if r.entries else None
++            elif r.query_id == qt:
++                tb = r.entries[0].value if r.entries else None
+         rr = unmarshal(RouletteRound, rb) if rb else None
+         if rr is None:
+             raise PluginError(1, "plugin", "round not found")
+@@ -1272,12 +1305,24 @@ class Contract:
+             raise PluginError(1, "plugin", "round not open")
+         if bb:
+             raise PluginError(1, "plugin", "address already has a bet in this round")
+-        player = unmarshal(Account, plb) if plb else Account()
++        treasury = unmarshal(Account, tb) if tb else Account()
++        player_is_treasury = player_key == treasury_key
++        player = treasury if player_is_treasury else (unmarshal(Account, plb) if plb else Account())
+         escrow = unmarshal(Account, eb) if eb else Account()
+-        if player.amount < msg.amount:
++        reserve = groulette.liability_reserve(msg.bet_type, msg.amount)
++        if reserve > UINT64_MAX or msg.amount > UINT64_MAX - reserve:
++            raise err_invalid_amount()
++        required_from_treasury = reserve + (msg.amount if player_is_treasury else 0)
++        if player.amount < msg.amount or treasury.amount < required_from_treasury:
+             raise err_insufficient_funds()
+-        player.amount -= msg.amount
+-        escrow.amount += msg.amount
++        if escrow.amount > UINT64_MAX - msg.amount - reserve or rr.pot_total > UINT64_MAX - msg.amount:
++            raise err_invalid_amount()
++        if player_is_treasury:
++            treasury.amount -= msg.amount + reserve
++        else:
++            player.amount -= msg.amount
++            treasury.amount -= reserve
++        escrow.amount += msg.amount + reserve
+         rr.pot_total += msg.amount
+         rr.bettor_addresses.append(msg.player_address)
+         bet = RouletteBetRecord()
+@@ -1286,12 +1331,14 @@ class Contract:
+         bet.bet_type = msg.bet_type
+         bet.bet_number = msg.bet_number
+         bet.amount = msg.amount
+-        w = await self.plugin.state_write(self, PluginStateWriteRequest(sets=[
+-            PluginSetOp(key=player_key, value=marshal(player)),
++        sets = [] if player_is_treasury else [PluginSetOp(key=player_key, value=marshal(player))]
++        sets.extend([
++            PluginSetOp(key=treasury_key, value=marshal(treasury)),
+             PluginSetOp(key=escrow_key, value=marshal(escrow)),
+             PluginSetOp(key=round_key, value=marshal(rr)),
+             PluginSetOp(key=bet_key, value=marshal(bet)),
+-        ]))
++        ])
++        w = await self.plugin.state_write(self, PluginStateWriteRequest(sets=sets))
+         out = PluginDeliverResponse()
+         if w.HasField("error"):
+             out.error.CopyFrom(w.error)
+@@ -1306,6 +1353,7 @@ class Contract:
          their own bet's odds; whatever the escrow doesn't pay out (losing
          stakes) plus the rake skimmed off winning payouts both go to the
          treasury, so escrow always ends a settle at exactly zero."""
@@ -183,7 +259,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_roulette_round(msg.round_id)
-@@ -1363,7 +1393,10 @@ class Contract:
+@@ -1363,7 +1411,10 @@ class Contract:
              rake = gross * rr.rake_bps // 10000
              net = gross - rake
              acct_bytes = by_qid.get(acct_qids[addr])
@@ -195,7 +271,7 @@ index 4cac30a0..58e5d2ed 100644
              acct.amount += net
              total_gross_to_winners += gross
              total_rake += rake
-@@ -1378,11 +1411,15 @@ class Contract:
+@@ -1378,11 +1429,15 @@ class Contract:
          # rather than paying out from nothing.
          if escrow.amount >= total_gross_to_winners:
              house_take = escrow.amount - total_gross_to_winners  # losing stakes -> pure house profit
@@ -212,7 +288,7 @@ index 4cac30a0..58e5d2ed 100644
              treasury.amount += total_rake - shortfall
          escrow.amount = 0
          sets.append(PluginSetOp(key=escrow_key, value=marshal(escrow)))
-@@ -1403,6 +1440,7 @@ class Contract:
+@@ -1403,6 +1458,7 @@ class Contract:
          """Refund every escrowed bet for a round the operator never settled
          within ROOM_EXPIRY_BLOCKS. Each bettor gets back exactly what their own
          RouletteBetRecord says they staked -- not a recomputed guess."""
@@ -220,16 +296,54 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_roulette_round(msg.round_id)
-@@ -1447,6 +1485,8 @@ class Contract:
+@@ -1419,8 +1475,11 @@ class Contract:
+ 
+         bettors = [bytes(a) for a in rr.bettor_addresses]
+         escrow_key = key_for_account(roulette_escrow_address(msg.round_id))
++        treasury_key = key_for_account(TREASURY_ADDRESS)
+         qe = random.randint(0, 2**53)
+-        keys = [PluginKeyRead(query_id=qe, key=escrow_key)]
++        qt = random.randint(0, 2**53)
++        keys = [PluginKeyRead(query_id=qe, key=escrow_key),
++                PluginKeyRead(query_id=qt, key=treasury_key)]
+         bet_qids, acct_qids = [], {}
+         for addr in bettors:
+             bq = random.randint(0, 2**53)
+@@ -1436,6 +1495,7 @@ class Contract:
+         for r in resp.results:
+             by_qid[r.query_id] = r.entries[0].value if r.entries else None
+         escrow = unmarshal(Account, by_qid.get(qe)) if by_qid.get(qe) else Account()
++        treasury = unmarshal(Account, by_qid.get(qt)) if by_qid.get(qt) else Account()
+ 
+         sets = []
+         total_refunded = 0
+@@ -1446,15 +1506,23 @@ class Contract:
+             if amount <= 0:
                  continue
              acct_bytes = by_qid.get(acct_qids[addr])
-             acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
+-            acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
++            acct = treasury if addr == TREASURY_ADDRESS else (
++                unmarshal(Account, acct_bytes) if acct_bytes else Account())
 +            if acct.amount > UINT64_MAX - amount:
 +                raise err_invalid_amount()
              acct.amount += amount
              total_refunded += amount
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
-@@ -1520,6 +1560,7 @@ class Contract:
+ 
+         if escrow.amount < total_refunded:
+             raise PluginError(1, "plugin", "escrow underfunded")
+-        escrow.amount -= total_refunded
++        reserve_release = escrow.amount - total_refunded
++        if treasury.amount > UINT64_MAX - reserve_release:
++            raise err_invalid_amount()
++        treasury.amount += reserve_release
++        escrow.amount = 0
+         sets.append(PluginSetOp(key=escrow_key, value=marshal(escrow)))
++        sets.append(PluginSetOp(key=treasury_key, value=marshal(treasury)))
+         rr.status = 2  # expired/refunded
+         sets.append(PluginSetOp(key=round_key, value=marshal(rr)))
+ 
+@@ -1520,6 +1588,7 @@ class Contract:
          return r
  
      async def _deliver_message_open_domino(self, msg, height: int = 0) -> PluginDeliverResponse:
@@ -237,7 +351,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1545,6 +1586,7 @@ class Contract:
+@@ -1545,6 +1614,7 @@ class Contract:
          return out
  
      async def _deliver_message_join_domino(self, msg) -> PluginDeliverResponse:
@@ -245,7 +359,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1603,6 +1645,7 @@ class Contract:
+@@ -1603,6 +1673,7 @@ class Contract:
          here to also validate the moves since domino's outcome depends on
          player choices, not just the seed. An illegal move anywhere in the
          claimed log rejects the whole settle -- there is no partial credit."""
@@ -253,7 +367,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1664,11 +1707,16 @@ class Contract:
+@@ -1664,11 +1735,16 @@ class Contract:
          if escrow.amount < total:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= total
@@ -271,7 +385,7 @@ index 4cac30a0..58e5d2ed 100644
              acct.amount += payouts[i]
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
  
-@@ -1688,6 +1736,7 @@ class Contract:
+@@ -1688,6 +1764,7 @@ class Contract:
          """Refund every escrowed entry fee for a round the operator never
          settled within ROOM_EXPIRY_BLOCKS -- including a round that only ever
          got one participant (that one address is simply refunded alone)."""
@@ -279,7 +393,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1724,6 +1773,8 @@ class Contract:
+@@ -1724,6 +1801,8 @@ class Contract:
          for addr in participants:
              acct_bytes = by_qid.get(acct_qids[addr])
              acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
@@ -288,7 +402,7 @@ index 4cac30a0..58e5d2ed 100644
              acct.amount += rr.entry_fee
              total_refunded += rr.entry_fee
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
-@@ -1799,6 +1850,7 @@ class Contract:
+@@ -1799,6 +1878,7 @@ class Contract:
          return r
  
      async def _deliver_message_open_poker(self, msg, height: int = 0) -> PluginDeliverResponse:
@@ -296,7 +410,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -1826,6 +1878,7 @@ class Contract:
+@@ -1826,6 +1906,7 @@ class Contract:
          return out
  
      async def _deliver_message_join_poker(self, msg) -> PluginDeliverResponse:
@@ -304,7 +418,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -1885,6 +1938,7 @@ class Contract:
+@@ -1885,6 +1966,7 @@ class Contract:
          Domino's even pari-mutuel split, poker's payout must account for
          chips a participant never put in (stacks_remaining, always returned
          untaxed) alongside a rake taken only from the actually-contested pot."""
@@ -312,7 +426,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -1946,11 +2000,16 @@ class Contract:
+@@ -1946,11 +2028,16 @@ class Contract:
          if escrow.amount < rr.escrow_total:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= rr.escrow_total
@@ -330,7 +444,7 @@ index 4cac30a0..58e5d2ed 100644
              acct.amount += final_payouts[addr]
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
  
-@@ -1971,6 +2030,7 @@ class Contract:
+@@ -1971,6 +2058,7 @@ class Contract:
          settled within ROOM_EXPIRY_BLOCKS -- including a round that only
          ever got one participant (that one address is simply refunded
          alone)."""
@@ -338,7 +452,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -2007,6 +2067,8 @@ class Contract:
+@@ -2007,6 +2095,8 @@ class Contract:
          for addr in participants:
              acct_bytes = by_qid.get(acct_qids[addr])
              acct = unmarshal(Account, acct_bytes) if acct_bytes else Account()
@@ -347,7 +461,7 @@ index 4cac30a0..58e5d2ed 100644
              acct.amount += rr.buy_in
              total_refunded += rr.buy_in
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
-@@ -2063,6 +2125,7 @@ class Contract:
+@@ -2063,6 +2153,7 @@ class Contract:
          return val, None
  
      async def _deliver_buy_coins(self, msg):
@@ -355,7 +469,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          key = key_for_account(msg.recipient_address)
-@@ -2081,6 +2144,7 @@ class Contract:
+@@ -2081,6 +2172,7 @@ class Contract:
          return out
  
      async def _deliver_buy_gems(self, msg):
@@ -363,7 +477,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          key = key_for_gems(msg.recipient_address)
-@@ -2100,6 +2164,7 @@ class Contract:
+@@ -2100,6 +2192,7 @@ class Contract:
          return out
  
      async def _deliver_transfer_gems(self, msg):
@@ -371,7 +485,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          from_key = key_for_gems(msg.from_address)
-@@ -2147,6 +2212,8 @@ class Contract:
+@@ -2147,6 +2240,8 @@ class Contract:
              raise PluginError(1, "plugin", "empty token_id")
          if not msg.kind:
              raise PluginError(1, "plugin", "empty kind")
@@ -380,7 +494,7 @@ index 4cac30a0..58e5d2ed 100644
          r = PluginCheckResponse()
          r.recipient = msg.owner_address
          r.authorized_signers.append(msg.operator_address)
-@@ -2174,6 +2241,7 @@ class Contract:
+@@ -2174,6 +2269,7 @@ class Contract:
          return r
  
      async def _deliver_mint_cosmetic(self, msg):
@@ -388,7 +502,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          key = key_for_cosmetic(msg.token_id)
-@@ -2194,6 +2262,7 @@ class Contract:
+@@ -2194,6 +2290,7 @@ class Contract:
          return out
  
      async def _deliver_buy_cosmetic(self, msg):
@@ -396,7 +510,7 @@ index 4cac30a0..58e5d2ed 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          # price comes from the SHARED economy catalog (must be a gem-priced item)
-@@ -2240,6 +2309,7 @@ class Contract:
+@@ -2240,6 +2337,7 @@ class Contract:
          return out
  
      async def _deliver_transfer_cosmetic(self, msg):
@@ -491,6 +605,24 @@ index 85129345..fcaa11e6 100644
          if amount < 0:
              raise ValueError("cannot debit a negative amount")
          if not self.can_afford(currency, amount):
+diff --git a/plugin/python/contract/game/roulette.py b/plugin/python/contract/game/roulette.py
+index 88bd8417..35af9a5f 100644
+--- a/plugin/python/contract/game/roulette.py
++++ b/plugin/python/contract/game/roulette.py
+@@ -88,3 +88,13 @@ def payout_for(bet_type: str, bet_number: int, amount: int, spin: int) -> int:
+     if not bet_wins(bet_type, bet_number, spin):
+         return 0
+     return amount * _PAYOUT_MULTIPLIER[bet_type]
++
++
++def liability_reserve(bet_type: str, amount: int) -> int:
++    """Treasury funds locked with a stake so its maximum gross payout is funded.
++
++    The player's stake already covers one unit of the gross payout.  Locking
++    the remaining ``multiplier - 1`` units is deliberately conservative: rake
++    is not counted as available until settlement has actually succeeded.
++    """
++    return amount * (_PAYOUT_MULTIPLIER[bet_type] - 1)
 diff --git a/plugin/python/main.py b/plugin/python/main.py
 index 65e78bbc..e5766b9f 100644
 --- a/plugin/python/main.py
@@ -743,7 +875,7 @@ index 065061e5..e2ec28a0 100644
  
      def test_cannot_expire_twice(self, contract, state):
 diff --git a/plugin/python/tests/test_roulette_lifecycle.py b/plugin/python/tests/test_roulette_lifecycle.py
-index d60cc162..722bfe98 100644
+index d60cc162..7893a732 100644
 --- a/plugin/python/tests/test_roulette_lifecycle.py
 +++ b/plugin/python/tests/test_roulette_lifecycle.py
 @@ -102,7 +102,7 @@ def contract(state):
@@ -755,3 +887,73 @@ index d60cc162..722bfe98 100644
  
  
  def open_roulette(contract, round_id=b"round001", rake_bps=1000, height=1000,
+@@ -115,6 +115,9 @@ def open_roulette(contract, round_id=b"round001", rake_bps=1000, height=1000,
+ 
+ 
+ def place_bet(contract, state, player, round_id, amount, bet_type, bet_number=0):
++    reserve = groulette.liability_reserve(bet_type, amount)
++    if player != TREASURY_ADDRESS and state.balance(TREASURY_ADDRESS) < reserve:
++        state.set_balance(TREASURY_ADDRESS, reserve)
+     state.set_balance(player, amount)
+     msg = MessageRouletteBet(player_address=player, round_id=round_id, bet_type=bet_type,
+                               bet_number=bet_number, amount=amount)
+@@ -161,15 +164,16 @@ class TestSettleRouletteHappyPath:
+         # 10000 - 3500 + 380 = 6880
+         assert state.balance(TREASURY_ADDRESS) == 6880
+ 
+-    def test_settle_fails_safely_when_treasury_cannot_cover_shortfall(self, contract, state):
+-        # Treasury starts empty -- a big win the round's own pot can't cover
+-        # must fail the settle rather than pay out from nothing.
++    def test_bet_fails_before_acceptance_when_liability_cannot_be_reserved(self, contract, state):
++        # Treasury starts empty. The bet itself must fail atomically instead of
++        # creating a round that can only discover insolvency at settlement.
+         rid = open_roulette(contract, rake_bps=1000, commitment=seed_commitment(SEED_FOR_1))
+-        place_bet(contract, state, PLAYER_A, rid, 100, "straight", 1)  # wins 3600, pot only has 100
+-
+-        with pytest.raises(PluginError, match="treasury underfunded"):
+-            run(contract._deliver_message_settle_roulette(
+-                MessageSettleRoulette(operator_address=ADMIN, round_id=rid, seed=SEED_FOR_1)))
++        state.set_balance(PLAYER_A, 100)
++        before = dict(state.kv)
++        with pytest.raises(PluginError, match="insufficient funds"):
++            run(contract._deliver_message_roulette_bet(MessageRouletteBet(
++                player_address=PLAYER_A, round_id=rid, bet_type="straight", bet_number=1, amount=100)))
++        assert state.kv == before
+ 
+     def test_realistic_pot_house_take_goes_to_treasury(self, contract, state):
+         rid = open_roulette(contract, rake_bps=1000, commitment=seed_commitment(SEED_FOR_1))
+@@ -188,7 +192,7 @@ class TestSettleRouletteHappyPath:
+         # escrow fully drained; treasury gets rake (20) + house_take
+         # (pot 300 - gross_to_winners 200 = 100) = 120
+         assert state.balance(roulette_escrow_address(rid)) == 0
+-        assert state.balance(TREASURY_ADDRESS) == 120
++        assert state.balance(TREASURY_ADDRESS) == 420  # initial 300 reserve + 120 house result
+ 
+     def test_zero_loses_every_outside_bet(self, contract, state):
+         rid = open_roulette(contract, rake_bps=0, commitment=seed_commitment(SEED_FOR_0))
+@@ -203,7 +207,7 @@ class TestSettleRouletteHappyPath:
+         assert state.balance(PLAYER_A) == 0
+         assert state.balance(PLAYER_B) == 0
+         assert state.balance(PLAYER_C) == 0
+-        assert state.balance(TREASURY_ADDRESS) == 300  # entire pot -> house
++        assert state.balance(TREASURY_ADDRESS) == 600  # initial 300 reserve + entire 300 pot
+ 
+     def test_wrong_seed_rejected(self, contract, state):
+         rid = open_roulette(contract, commitment=seed_commitment(SEED_FOR_1))
+@@ -248,7 +252,7 @@ class TestExpireRoulette:
+         place_bet(contract, state, PLAYER_A, rid, 100, "red")
+         place_bet(contract, state, PLAYER_B, rid, 150, "straight", 1)
+ 
+-        assert state.balance(roulette_escrow_address(rid)) == 250
++        assert state.balance(roulette_escrow_address(rid)) == 5600  # stakes + worst-case reserves
+         assert state.balance(PLAYER_A) == 0
+         assert state.balance(PLAYER_B) == 0
+ 
+@@ -262,6 +266,7 @@ class TestExpireRoulette:
+         assert state.balance(PLAYER_A) == 100
+         assert state.balance(PLAYER_B) == 150
+         assert state.balance(roulette_escrow_address(rid)) == 0
++        assert state.balance(TREASURY_ADDRESS) == 5350
+ 
+     def test_cannot_expire_twice(self, contract, state):
+         rid = open_roulette(contract, height=1000)

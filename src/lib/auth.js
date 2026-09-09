@@ -72,3 +72,14 @@ export function walletOperation(address, txHash, fields = {}) {
   if (typeof globalThis.crypto?.randomUUID !== 'function') throw new Error('Secure operation IDs are unavailable.')
   return { address, operation_id: globalThis.crypto.randomUUID(), tx_hash: normalizedHash, ...fields }
 }
+
+export function walletAction(address, actionContext, fields = {}) {
+  const sequence = actionContext?.sequence
+  const stateHash = actionContext?.stateHash?.toLowerCase()
+  if (!/^[a-f0-9]{40}$/.test(address) || !Number.isSafeInteger(sequence) || sequence < 0 ||
+      !/^[a-f0-9]{64}$/.test(stateHash || '')) {
+    throw new Error('Invalid signed-action state context.')
+  }
+  if (typeof globalThis.crypto?.randomUUID !== 'function') throw new Error('Secure operation IDs are unavailable.')
+  return { address, operation_id: globalThis.crypto.randomUUID(), sequence, state_hash: stateHash, ...fields }
+}

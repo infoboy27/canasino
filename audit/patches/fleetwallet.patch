@@ -1,0 +1,373 @@
+diff --git a/extension/background/service-worker.js b/extension/background/service-worker.js
+index ef89346..c71de12 100644
+--- a/extension/background/service-worker.js
++++ b/extension/background/service-worker.js
+@@ -25,6 +25,7 @@ import {
+ import { applyAll as applyRpcOverrides, getEffectiveUrl } from "../lib/rpc-config.js";
+ // Static import — dynamic import() is disallowed in MV3 service workers.
+ import * as cnpy from "../lib/chains/canopy.js";
++import { parseCanasinoAuthMessage, validateDisplayMatches } from "../lib/canasino-auth.js";
+ const { canopy } = cnpy;
+ 
+ const log = (...a) => console.log("[fleetwallet:bg]", ...a);
+@@ -112,6 +113,7 @@ async function handleRpc(msg, sender) {
+ 
+     // Generic Canopy plugin transaction — typed fields, never raw bytes.
+     case "canopy_signAndSubmit":   return await rpcCanopySignAndSubmit(origin, params[0] || {});
++    case "canopy_signMessage":     return await rpcCanopySignMessage(origin, params[0] || {});
+ 
+     // EIP-1193 — backs the injected window.ethereum / EIP-6963 provider so
+     // Ethereum-only dApps (e.g. Canopy Launchpad's Reown AppKit SIWE login)
+@@ -565,6 +567,32 @@ async function rpcCanopySignAndSubmit(origin, payload) {
+   return await openApprovalWindow(intent);
+ }
+ 
++async function rpcCanopySignMessage(origin, payload) {
++  const grant = await requirePermission(origin, "tx.write");
++  if (grant.chain !== "canopy") {
++    throw rpcError(-32000, `canopy_signMessage not supported for chain ${grant.chain}`);
++  }
++  const messageHex = String(payload.messageHex ?? "");
++  let parsed;
++  try {
++    parsed = parseCanasinoAuthMessage(messageHex, grant.address);
++    validateDisplayMatches(parsed.document, payload.display);
++  } catch (error) {
++    throw rpcError(-32602, error.message || "invalid Canasino authorization message");
++  }
++  const id = newId();
++  const intent = {
++    id,
++    kind: "canopy-message",
++    origin,
++    address: grant.address,
++    chain: grant.chain,
++    request: { messageHex: messageHex.toLowerCase(), document: parsed.document },
++    createdAt: Date.now(),
++  };
++  return await openApprovalWindow(intent);
++}
++
+ async function rpcCanoliqRedeem(origin, payload) {
+   return rpcCanoliqTx(origin, payload, {
+     method: "canoliq_redeem", kind: "canoliq-redeem", unit: "uCCNPY",
+diff --git a/extension/content/inject.js b/extension/content/inject.js
+index 921015d..038a1dc 100644
+--- a/extension/content/inject.js
++++ b/extension/content/inject.js
+@@ -41,6 +41,9 @@
+ //     field to the connected address). The wallet encodes + shows every
+ //     field in the approval popup, then signs and posts to the request's
+ //     rpcUrl. Requires the "tx.write" permission on a "canopy" grant.
++//   canopy_signMessage params: [{messageHex, display?}]
++//     Validates, displays and signs canonical CANASINO-AUTH-V1 bytes with the
++//     connected BLS Canopy account. It never signs a dApp-provided summary.
+ //
+ // Permissions vocabulary:  "account" | "balance" | "stake.read" |
+ //                          "stake.write" | "tx.write"
+@@ -83,7 +86,7 @@
+ 
+   const fleet = {
+     isFleetWallet: true,
+-    version: "0.24.0",
++    version: "0.29.1",
+ 
+     // Low-level
+     request: ({ method, params } = {}) => rpc(method, params),
+@@ -99,6 +102,7 @@
+     stakeApp:       (req = {}) => rpc("fleet_stakeApp", [req]),
+     unstakeApp:     () => rpc("fleet_unstakeApp", []),
+     canopySignAndSubmit: (req = {}) => rpc("canopy_signAndSubmit", [req]),
++    canopySignMessage: (req = {}) => rpc("canopy_signMessage", [req]),
+   };
+ 
+   Object.defineProperty(window, "fleet", { value: fleet, writable: false, configurable: false });
+diff --git a/extension/lib/canasino-auth.js b/extension/lib/canasino-auth.js
+new file mode 100644
+index 0000000..b53b933
+--- /dev/null
++++ b/extension/lib/canasino-auth.js
+@@ -0,0 +1,106 @@
++import { blsPublicKeyFromPriv, blsSign } from "./canopy-bls.js";
++
++const AUTH_KEYS = [
++  "action", "address", "chainId", "challengeId", "domain", "expiresAt",
++  "issuedAt", "networkId", "nonce", "payloadHash", "resource", "version",
++];
++const ACTIONS = new Set([
++  "join_room", "roulette_bet", "join_domino", "domino_move",
++  "join_poker", "poker_action", "read_private_state",
++]);
++
++function hexToBytes(value) {
++  if (typeof value !== "string" || value.length === 0 || value.length > 8192 ||
++      value.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(value)) {
++    throw new Error("messageHex must be non-empty even-length hex (max 4096 bytes)");
++  }
++  const out = new Uint8Array(value.length / 2);
++  for (let i = 0; i < out.length; i++) out[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
++  return out;
++}
++
++function bytesToHex(value) {
++  return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("");
++}
++
++function canonicalize(value) {
++  if (Array.isArray(value)) return value.map(canonicalize);
++  if (value && typeof value === "object") {
++    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
++  }
++  return value;
++}
++
++export function parseCanasinoAuthMessage(messageHex, expectedAddress, now = Math.floor(Date.now() / 1000)) {
++  const bytes = hexToBytes(messageHex);
++  let text, document;
++  try {
++    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
++    document = JSON.parse(text);
++  } catch (error) {
++    throw new Error("authorization message must be valid UTF-8 JSON", { cause: error });
++  }
++  if (!document || Array.isArray(document) || typeof document !== "object") {
++    throw new Error("authorization message must be a JSON object");
++  }
++  if (JSON.stringify(Object.keys(document).sort()) !== JSON.stringify(AUTH_KEYS)) {
++    throw new Error("authorization message has unexpected fields");
++  }
++  if (JSON.stringify(canonicalize(document)) !== text) {
++    throw new Error("authorization message is not canonical JSON");
++  }
++  if (document.version !== "CANASINO-AUTH-V1") throw new Error("unsupported authorization version");
++  if (!/^[a-f0-9]{40}$/.test(document.address) || document.address !== expectedAddress) {
++    throw new Error("authorization address does not match the connected account");
++  }
++  if (!ACTIONS.has(document.action)) throw new Error("unsupported authorization action");
++  if (!/^[a-z0-9.-]{1,253}$/.test(document.domain) || document.domain.startsWith(".") || document.domain.endsWith(".")) {
++    throw new Error("invalid authorization domain");
++  }
++  if (typeof document.resource !== "string" || document.resource.length < 1 ||
++      document.resource.length > 256 || !/^[\x20-\x7e]+$/.test(document.resource)) {
++    throw new Error("invalid authorization resource");
++  }
++  if (!/^[a-f0-9]{64}$/.test(document.nonce) || !/^[a-f0-9]{64}$/.test(document.payloadHash)) {
++    throw new Error("invalid authorization nonce or payload hash");
++  }
++  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(document.challengeId)) {
++    throw new Error("invalid authorization challenge id");
++  }
++  for (const key of ["chainId", "networkId", "issuedAt", "expiresAt"]) {
++    if (!Number.isSafeInteger(document[key]) || document[key] <= 0) throw new Error(`invalid ${key}`);
++  }
++  if (document.expiresAt <= document.issuedAt || document.expiresAt - document.issuedAt > 300 ||
++      document.issuedAt > now + 30 || document.expiresAt < now) {
++    throw new Error("authorization message is expired or has an invalid lifetime");
++  }
++  return { bytes, document };
++}
++
++export function validateDisplayMatches(document, display) {
++  if (display === undefined) return;
++  const lines = display?.lines;
++  if (!Array.isArray(lines)) throw new Error("authorization display must match signed fields");
++  const values = new Map(lines.map((line) => [line?.label, line?.value]));
++  if (values.get("Action") !== document.action || values.get("Resource") !== document.resource) {
++    throw new Error("authorization display does not match signed fields");
++  }
++}
++
++export function signCanasinoAuthMessage(privateKey, messageHex) {
++  if (!(privateKey instanceof Uint8Array) || privateKey.length !== 32) {
++    throw new Error("Canasino authorization requires a 32-byte BLS account");
++  }
++  const message = hexToBytes(messageHex);
++  return {
++    publicKey: bytesToHex(blsPublicKeyFromPriv(privateKey)),
++    signature: bytesToHex(blsSign(privateKey, message)),
++  };
++}
++
++export async function canopyAddressFromPublicKey(publicKeyHex) {
++  const digest = await crypto.subtle.digest("SHA-256", hexToBytes(publicKeyHex));
++  return bytesToHex(new Uint8Array(digest).slice(0, 20));
++}
++
++export const _internal = { canonicalize, hexToBytes, bytesToHex, AUTH_KEYS, ACTIONS };
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 878ec34..1857f1c 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -2,7 +2,7 @@
+   "manifest_version": 3,
+   "name": "FleetWallet",
+   "short_name": "FleetWallet",
+-  "version": "0.29.0",
++  "version": "0.29.1",
+   "description": "A Nodefleet self-custody multi-chain wallet. ETH + Cosmos + Pocket + Canopy from one seed.",
+   "author": "Nodefleet",
+   "homepage_url": "https://fleetwallet.nodefleet.net",
+diff --git a/extension/popup/popup.js b/extension/popup/popup.js
+index 6b26dc5..c7e7ac6 100644
+--- a/extension/popup/popup.js
++++ b/extension/popup/popup.js
+@@ -2174,6 +2174,8 @@ function renderGrantView(intent) {
+     // dApp-supplied title — textContent, so no escaping needed here.
+     $("grant-title").textContent =
+       (intent.request?.display?.title || "").trim() || "Sign Canopy transaction";
++  } else if (intent.kind === "canopy-message") {
++    $("grant-title").textContent = "Authorize Canasino operation";
+   } else if (intent.kind === "personal-sign") {
+     $("grant-title").textContent = "Sign message";
+   } else {
+@@ -2182,11 +2184,11 @@ function renderGrantView(intent) {
+   $("grant-origin").textContent = intent.origin || "(unknown origin)";
+ 
+   // Intents that carry a fixed intent.address (personal-sign, stake, the
+-  // canoliq-* actions) must show THAT account here, not whatever happens to
++  // canoliq-* and canopy-message actions) must show THAT account here, not whatever happens to
+   // be active in the popup right now — the summary the user reads before
+   // approving has to match the account that will actually sign.
+   const acct = intent.address
+-    ? (getState().accountsByChain?.[intent.chain]?.find((a) => a.address === intent.address) || activeAccount())
++    ? (getState().accountsByChain?.[intent.chain]?.find((a) => a.address === intent.address) || null)
+     : activeAccount();
+   const summary = $("grant-summary");
+   summary.innerHTML = "";
+@@ -2312,6 +2314,21 @@ function renderGrantView(intent) {
+       <span class="grant-perm-name">Network: ${escapeHtml(rpcHost)}</span>
+       <span class="grant-perm-desc">chainId ${Number(r.chainId) || "?"} · networkId ${Number(r.networkId) || "?"} · fee ${(Number(r.fee || 0) / 1_000_000)} CNPY</span>`;
+     perms.appendChild(netLi);
++  } else if (intent.kind === "canopy-message") {
++    const d = intent.request?.document || {};
++    const rows = [
++      ["Domain", d.domain], ["Action", d.action], ["Resource", d.resource],
++      ["Chain", `${d.chainId} / network ${d.networkId}`],
++      ["Expires", new Date(Number(d.expiresAt || 0) * 1000).toISOString()],
++      ["Payload hash", d.payloadHash],
++    ];
++    for (const [label, value] of rows) {
++      const li = document.createElement("div");
++      li.className = "grant-perm";
++      li.innerHTML = `
++        <span class="grant-perm-name">${escapeHtml(label)}: ${escapeHtml(String(value ?? ""))}</span>`;
++      perms.appendChild(li);
++    }
+   }
+ }
+ 
+@@ -2436,6 +2453,36 @@ $("grant-approve").addEventListener("click", async () => {
+     return;
+   }
+ 
++  if (intent.kind === "canopy-message") {
++    $("grant-approve").disabled = true;
++    $("grant-approve").textContent = "Signing…";
++    try {
++      const { mnemonic, importedKeys, accountsByChain } = getState();
++      if (!mnemonic) throw new Error("vault locked");
++      const signingAccount = (accountsByChain?.canopy || []).find((a) => a.address === intent.address);
++      if (!signingAccount) throw new Error("connected Canopy account not found");
++      const privKey = privateKeyForAccount(mnemonic, importedKeys, signingAccount);
++      try {
++        const { signCanasinoAuthMessage, canopyAddressFromPublicKey, parseCanasinoAuthMessage } =
++          await import("../lib/canasino-auth.js");
++        parseCanasinoAuthMessage(intent.request.messageHex, intent.address);
++        const proof = signCanasinoAuthMessage(privKey, intent.request.messageHex);
++        const derivedAddress = await canopyAddressFromPublicKey(proof.publicKey);
++        if (derivedAddress !== intent.address) throw new Error("signing key does not match connected account");
++        await postApprovalResult(intent.id, proof);
++        window.close();
++      } finally {
++        privKey.fill(0);
++      }
++    } catch (e) {
++      $("grant-err").textContent = e.message || String(e);
++      $("grant-err").hidden = false;
++      $("grant-approve").disabled = false;
++      $("grant-approve").textContent = "Approve";
++    }
++    return;
++  }
++
+   if (intent.kind === "stake") {
+     // Reuse the existing stake pipeline: pre-fill the form and let the user
+     // verify + submit. Once broadcast, we relay the txhash back.
+diff --git a/tests/canasino-auth.test.js b/tests/canasino-auth.test.js
+new file mode 100644
+index 0000000..b411623
+--- /dev/null
++++ b/tests/canasino-auth.test.js
+@@ -0,0 +1,72 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++
++import { bls12_381 } from "../extension/lib/vendor/curves/bls12-381.mjs";
++import {
++  _internal, canopyAddressFromPublicKey, parseCanasinoAuthMessage,
++  signCanasinoAuthMessage, validateDisplayMatches,
++} from "../extension/lib/canasino-auth.js";
++
++const NOW = 2_000_000_000;
++const PRIVATE_KEY = new Uint8Array(32).fill(7);
++
++async function fixture(changes = {}) {
++  const proof = signCanasinoAuthMessage(PRIVATE_KEY, "00");
++  const address = await canopyAddressFromPublicKey(proof.publicKey);
++  const document = {
++    action: "join_room",
++    address,
++    challengeId: "12345678-1234-4234-8234-123456789abc",
++    chainId: 406,
++    domain: "canasino.org",
++    expiresAt: NOW + 120,
++    issuedAt: NOW,
++    networkId: 1,
++    nonce: "ab".repeat(32),
++    payloadHash: "cd".repeat(32),
++    resource: "round:0011223344556677",
++    version: "CANASINO-AUTH-V1",
++    ...changes,
++  };
++  const text = JSON.stringify(_internal.canonicalize(document));
++  return { address, document, messageHex: _internal.bytesToHex(new TextEncoder().encode(text)) };
++}
++
++test("validates and parses the exact canonical authorization bytes", async () => {
++  const { address, document, messageHex } = await fixture();
++  const parsed = parseCanasinoAuthMessage(messageHex, address, NOW + 1);
++  assert.deepEqual(parsed.document, document);
++  validateDisplayMatches(document, {
++    lines: [{ label: "Action", value: document.action }, { label: "Resource", value: document.resource }],
++  });
++});
++
++test("rejects noncanonical, expired, wrong-account and misleading display requests", async () => {
++  const valid = await fixture();
++  const noncanonical = _internal.bytesToHex(new TextEncoder().encode(JSON.stringify({
++    version: valid.document.version, ...valid.document,
++  })));
++  assert.throws(() => parseCanasinoAuthMessage(noncanonical, valid.address, NOW), /canonical/);
++  assert.throws(() => parseCanasinoAuthMessage(valid.messageHex, "ff".repeat(20), NOW), /connected account/);
++  assert.throws(() => parseCanasinoAuthMessage(valid.messageHex, valid.address, NOW + 121), /expired/);
++  assert.throws(() => validateDisplayMatches(valid.document, {
++    lines: [{ label: "Action", value: "roulette_bet" }, { label: "Resource", value: valid.document.resource }],
++  }), /does not match/);
++});
++
++test("BLS proof verifies independently over the unmodified message bytes", async () => {
++  const { address, messageHex } = await fixture();
++  const proof = signCanasinoAuthMessage(PRIVATE_KEY, messageHex);
++  assert.equal(await canopyAddressFromPublicKey(proof.publicKey), address);
++  assert.equal(bls12_381.verify(
++    _internal.hexToBytes(proof.signature),
++    _internal.hexToBytes(messageHex),
++    _internal.hexToBytes(proof.publicKey),
++  ), true);
++  const modified = `${messageHex.slice(0, -2)}00`;
++  assert.equal(bls12_381.verify(
++    _internal.hexToBytes(proof.signature),
++    _internal.hexToBytes(modified),
++    _internal.hexToBytes(proof.publicKey),
++  ), false);
++});

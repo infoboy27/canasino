@@ -4,7 +4,7 @@ import { cardCost, parseTokens, formatTokens, wireAmount } from '../src/lib/amou
 import { getRooms } from '../src/lib/bingo.js'
 import { jsonGet, jsonPost, jsonPublicPost, jsonWalletPost } from '../src/lib/api.js'
 import { canopySignAndSubmit } from '../src/lib/fleet.js'
-import { payloadHash, requestWalletGrant, walletOperation } from '../src/lib/auth.js'
+import { payloadHash, requestWalletGrant, walletAction, walletOperation } from '../src/lib/auth.js'
 
 test('decimal amounts use exact integer arithmetic', () => {
   assert.equal(parseTokens('0.000001'), 1)
@@ -37,6 +37,15 @@ test('wallet operations bind a UUID and normalized exact transaction hash', () =
   assert.equal(operation.tx_hash, 'cd'.repeat(32))
   assert.equal(operation.num_cards, 2)
   assert.throws(() => walletOperation('ab'.repeat(20), 'bad'))
+})
+
+test('ordered wallet actions bind a UUID, sequence and exact prior-state hash', () => {
+  const action = walletAction('ab'.repeat(20), { sequence: 7, stateHash: 'CD'.repeat(32) }, { action: 'fold' })
+  assert.match(action.operation_id, /^[a-f0-9-]{36}$/i)
+  assert.equal(action.sequence, 7)
+  assert.equal(action.state_hash, 'cd'.repeat(32))
+  assert.equal(action.action, 'fold')
+  assert.throws(() => walletAction('ab'.repeat(20), { sequence: -1, stateHash: 'cd'.repeat(32) }))
 })
 test('HTTP failures and malformed JSON have safe messages', async () => {
   const previous = globalThis.fetch

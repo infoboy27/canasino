@@ -24,11 +24,16 @@ index 0000000..fadaf0e
 +ENV PYTHONDONTWRITEBYTECODE=1
 +CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-q"]
 diff --git a/Dockerfile.gameserver b/Dockerfile.gameserver
-index 4d304a0..8106151 100644
+index 4d304a0..9f3cbd2 100644
 --- a/Dockerfile.gameserver
 +++ b/Dockerfile.gameserver
-@@ -1,7 +1,16 @@
+@@ -1,7 +1,21 @@
  FROM python:3.12-slim
++ARG VCS_REF=unknown
++ARG BUILD_DATE=unknown
++LABEL org.opencontainers.image.revision=$VCS_REF \
++      org.opencontainers.image.created=$BUILD_DATE \
++      org.opencontainers.image.source="https://github.com/infoboy27/canasino-gameserver"
  WORKDIR /app
 -RUN pip install --no-cache-dir fastapi "uvicorn[standard]" blspy protobuf
 +COPY requirements.txt ./requirements.txt
@@ -133,18 +138,43 @@ index 8512934..fcaa11e 100644
              raise ValueError("cannot debit a negative amount")
          if not self.can_afford(currency, amount):
 diff --git a/gameserver/app.py b/gameserver/app.py
-index 5e5d490..999739a 100644
+index 5e5d490..80506d1 100644
 --- a/gameserver/app.py
 +++ b/gameserver/app.py
-@@ -62,20 +62,23 @@ import secrets
+@@ -34,7 +34,7 @@ Endpoints:
+   GET  /domino/rounds/{rid}/info         chain params for signing a wallet join
+   GET  /domino/rounds/{rid}/hand         the caller's own hand (address param trusted, same as Bingo's card reveal)
+   GET  /domino/rounds/{rid}/proof        provably-fair data (commitment always; seed/move log after settle)
+-  POST /domino/rounds/{rid}/move         submit one move (not an on-chain tx); auto-settles once the game ends
++  POST /domino/rounds/{rid}/move         submit one wallet-authorized move; auto-settles once the game ends
+   GET  /players/{address}/domino/history  a player's settled-round history
+   WS   /ws/domino/{rid}                  broadcast-only: both players see moves live as they're POSTed
+ 
+@@ -45,7 +45,7 @@ Endpoints:
+   GET  /poker/rounds/{rid}/info          chain params for signing a wallet join
+   GET  /poker/rounds/{rid}/hand          the caller's own hole cards (address param trusted, same as Domino)
+   GET  /poker/rounds/{rid}/proof         provably-fair data (commitment always; seed/action log/hole cards after settle)
+-  POST /poker/rounds/{rid}/action        submit one betting action (not an on-chain tx); auto-settles at showdown/fold
++  POST /poker/rounds/{rid}/action        submit one wallet-authorized action; auto-settles at showdown/fold
+   GET  /players/{address}/poker/history  a player's settled-hand history
+   WS   /ws/poker/{rid}                   broadcast-only: both players see actions live as they're POSTed
+ 
+@@ -57,25 +57,30 @@ generated once and persisted to the store (see startup log).
+ from __future__ import annotations
+ 
+ import asyncio
++import hashlib
+ import os
+ import secrets
  import time
++import uuid
  from dataclasses import asdict
  
 -from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 +from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
  from fastapi.middleware.cors import CORSMiddleware
 -from pydantic import BaseModel, field_validator
-+from fastapi.responses import JSONResponse
++from fastapi.responses import JSONResponse, PlainTextResponse
 +from pydantic import BaseModel, Field, field_validator
  
  from engine import card as ecard, economy as econ, rules as erules
@@ -152,18 +182,18 @@ index 5e5d490..999739a 100644
  from engine import domino as edomino
  from engine import poker as epoker
 -from .chain import CanopyBridge, Key
-+from .chain import CanopyBridge, Key, ReceiptInvalid, ReceiptPending
++from .chain import CanopyBridge, Key, ReceiptInvalid, ReceiptPending, UnixSocketSigner
 +from .auth import ALLOWED_ACTIONS, AuthError, WalletAuthorizer
  from .db import Store
  from .rooms import RoomManager
  from .roulette_rooms import RouletteManager
  from .domino_rooms import DominoManager
  from .poker_rooms import PokerManager
-+from .security import OperatorBoundary
++from .security import OperatorBoundary, PUBLIC_POST_PATHS
  
  MAX_OPEN_ROUNDS_PER_ROOM = 5
  MAX_OPEN_ROUNDS_TOTAL = 20
-@@ -120,18 +123,23 @@ class CreateRound(BaseModel):
+@@ -120,18 +125,23 @@ class CreateRound(BaseModel):
          return v
  
  
@@ -193,7 +223,7 @@ index 5e5d490..999739a 100644
  
  
  def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
-@@ -143,9 +151,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
+@@ -143,9 +153,9 @@ def _validate_bet(bet_type: str, bet_number: int, amount: int) -> None:
  
  class RouletteBetBody(BaseModel):
      bet_type: str
@@ -206,7 +236,7 @@ index 5e5d490..999739a 100644
  
      @field_validator("amount")
      @classmethod
-@@ -156,11 +164,11 @@ class RouletteBetBody(BaseModel):
+@@ -156,11 +166,11 @@ class RouletteBetBody(BaseModel):
          return v
  
  
@@ -222,7 +252,7 @@ index 5e5d490..999739a 100644
  
      @field_validator("amount")
      @classmethod
-@@ -172,18 +180,18 @@ class RouletteRegisterBody(BaseModel):
+@@ -172,18 +182,21 @@ class RouletteRegisterBody(BaseModel):
  
  
  class DominoJoinBody(BaseModel):
@@ -239,6 +269,9 @@ index 5e5d490..999739a 100644
  class DominoMoveBody(BaseModel):
 -    address: str
 +    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
++    operation_id: str | None = Field(default=None, min_length=36, max_length=36)
++    sequence: int | None = Field(default=None, strict=True, ge=0)
++    state_hash: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
      action: str                     # 'play' | 'draw' | 'pass'
 -    tile: list[int] | None = None   # [low, high] -- required for 'play'
 -    end: str | None = None          # 'left' | 'right' -- required for 'play' once the board is non-empty
@@ -247,7 +280,7 @@ index 5e5d490..999739a 100644
  
      @field_validator("action")
      @classmethod
-@@ -194,17 +202,17 @@ class DominoMoveBody(BaseModel):
+@@ -194,17 +207,20 @@ class DominoMoveBody(BaseModel):
  
  
  class PokerJoinBody(BaseModel):
@@ -264,13 +297,16 @@ index 5e5d490..999739a 100644
  class PokerActionBody(BaseModel):
 -    address: str
 +    address: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
++    operation_id: str | None = Field(default=None, min_length=36, max_length=36)
++    sequence: int | None = Field(default=None, strict=True, ge=0)
++    state_hash: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
      action: str        # 'fold' | 'check_call' | 'bet_raise'
 -    amount: int = 0     # only meaningful for 'bet_raise' -- total contributed to the street after this action
 +    amount: int = Field(default=0, strict=True, ge=0, le=POKER_BUY_IN)
  
      @field_validator("action")
      @classmethod
-@@ -214,6 +222,26 @@ class PokerActionBody(BaseModel):
+@@ -214,6 +230,26 @@ class PokerActionBody(BaseModel):
          return v
  
  
@@ -297,7 +333,32 @@ index 5e5d490..999739a 100644
  def _shop_item(item) -> dict:
      d = asdict(item)
      d["grants"] = asdict(item.grants)
-@@ -242,7 +270,7 @@ def _load_or_create_admin_token(store: Store) -> str:
+@@ -225,6 +261,24 @@ def _load_or_create_operator(bridge: CanopyBridge, store: Store) -> Key:
+     settle_room for every round it opened. Generating a fresh one each boot
+     (the old behavior) permanently strands any round left open across a
+     restart, with no recovery path."""
++    configured_address = os.environ.get("CASINO_OPERATOR_ADDRESS")
++    configured_public_key = os.environ.get("CASINO_OPERATOR_PUBLIC_KEY")
++    real_money = os.environ.get("CASINO_REAL_MONEY_ENABLED", "").lower() in ("1", "true", "yes")
++    if configured_address or configured_public_key:
++        if (not configured_address or len(configured_address) != 40 or
++                not configured_public_key or len(configured_public_key) != 96):
++            raise ValueError("CASINO_OPERATOR_ADDRESS/PUBLIC_KEY must be 20/48-byte hex")
++        try:
++            address_bytes = bytes.fromhex(configured_address)
++            public_key_bytes = bytes.fromhex(configured_public_key)
++        except ValueError as exc:
++            raise ValueError("CASINO_OPERATOR_ADDRESS/PUBLIC_KEY must be hex") from exc
++        derived = hashlib.sha256(public_key_bytes).digest()[:20]
++        if len(address_bytes) != 20 or len(public_key_bytes) != 48 or derived != address_bytes:
++            raise ValueError("configured operator address does not match its public key")
++        return Key(address=configured_address.lower(), public_key=configured_public_key.lower())
++    if real_money:
++        raise ValueError("real-money mode requires an externally managed operator identity")
+     saved = store.load_key("operator")
+     if saved is not None:
+         return Key(address=saved["address"], public_key=saved["public_key"], private_key=saved["private_key"])
+@@ -242,7 +296,7 @@ def _load_or_create_admin_token(store: Store) -> str:
          return token
      token = secrets.token_hex(24)
      store.save_setting("admin_token", token)
@@ -306,9 +367,17 @@ index 5e5d490..999739a 100644
            flush=True)
      print("[casino-gameserver] Set CASINO_ADMIN_TOKEN in the environment to control this explicitly.",
            flush=True)
-@@ -252,8 +280,15 @@ def _load_or_create_admin_token(store: Store) -> str:
+@@ -250,15 +304,32 @@ def _load_or_create_admin_token(store: Store) -> str:
+ 
+ 
  def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -> FastAPI:
-     bridge = bridge or CanopyBridge()
+-    bridge = bridge or CanopyBridge()
++    real_money = os.environ.get("CASINO_REAL_MONEY_ENABLED", "").lower() in ("1", "true", "yes")
++    signer_socket = os.environ.get("CASINO_SIGNER_SOCKET")
++    if bridge is None:
++        if real_money and not signer_socket:
++            raise ValueError("real-money mode requires CASINO_SIGNER_SOCKET")
++        bridge = CanopyBridge(signer=UnixSocketSigner(signer_socket) if signer_socket else None)
      store = store or Store()
 +    bridge.store = store
      operator = _load_or_create_operator(bridge, store)
@@ -322,7 +391,17 @@ index 5e5d490..999739a 100644
      manager = RoomManager(bridge, operator, store=store)
      roulette_manager = RouletteManager(bridge, operator, store=store)
      domino_manager = DominoManager(bridge, operator, store=store)
-@@ -266,15 +301,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+     poker_manager = PokerManager(bridge, operator, store=store)
+     app = FastAPI(title="Canasino")
++    chain_writes_enabled = (
++        os.environ.get("CASINO_CHAIN_WRITES_ENABLED", "").lower() in ("1", "true", "yes") or
++        bridge.query_url == "http://fake"
++    )
++    fair_randomness_v2 = False  # Protocol workstream 3 remains fail-closed.
+ 
+     _cors_env = os.environ.get(
+         "CASINO_CORS_ORIGINS",
+@@ -266,19 +337,35 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          "https://canasino.org,https://www.canasino.org"
      )
      cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
@@ -340,10 +419,26 @@ index 5e5d490..999739a 100644
      app.state.poker_manager = poker_manager
      app.state.store = store
 +    app.state.wallet_authorizer = wallet_authorizer
++    app.state.chain_writes_enabled = chain_writes_enabled
      chat_conns: dict[str, list[WebSocket]] = {}
      domino_conns: dict[str, list[WebSocket]] = {}
      poker_conns: dict[str, list[WebSocket]] = {}
-@@ -300,9 +339,142 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+ 
++    @app.middleware("http")
++    async def economic_kill_switch(request, call_next):
++        if (request.method == "POST" and request.url.path not in PUBLIC_POST_PATHS and
++                not chain_writes_enabled):
++            return JSONResponse(
++                {"detail": "Economic writes are paused by the server kill switch",
++                 "code": "wagering_paused"},
++                status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "60"},
++            )
++        return await call_next(request)
++
+     async def broadcast_domino(rid: str, message: dict) -> None:
+         dead = []
+         for ws in domino_conns.get(rid, []):
+@@ -300,14 +387,201 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
              poker_conns[rid].remove(ws)
  
      def require_admin(authorization: str | None = Header(default=None)) -> None:
@@ -443,6 +538,36 @@ index 5e5d490..999739a 100644
 +        return {"operationId": operation["operation_id"], "operationState": operation["state"],
 +                "txHash": operation["tx_hash"], "receiptHeight": operation["receipt_height"]}
 +
++    def authorize_wallet_action(authorization: str | None, *, body: BaseModel,
++                                address: str, action: str, resource: str) -> bool:
++        """Consume a one-use wallet grant for an off-chain ordered action.
++
++        Returns False only for the trusted operator recovery path. Browser
++        actions must bind a UUID, sequence, prior-state hash and the complete
++        request body into the signed CANASINO-AUTH-V1 challenge.
++        """
++        operator_header = f"Bearer {admin_token}"
++        if authorization and secrets.compare_digest(authorization.encode(), operator_header.encode()):
++            return False
++        prefix = "Canasino-Wallet "
++        if not authorization or not authorization.startswith(prefix):
++            raise AuthError("wallet authorization grant required")
++        token = authorization[len(prefix):]
++        operation_id = getattr(body, "operation_id", None)
++        sequence = getattr(body, "sequence", None)
++        state_hash = getattr(body, "state_hash", None)
++        if operation_id is None or sequence is None or state_hash is None:
++            raise AuthError("operation_id, sequence and state_hash are required", 422, "invalid_request")
++        try:
++            uuid.UUID(operation_id)
++        except (TypeError, ValueError) as exc:
++            raise AuthError("invalid operation id", 422, "invalid_request") from exc
++        wallet_authorizer.consume_grant(
++            token, address=address, action=action, resource=resource,
++            payload=body.model_dump(exclude_none=True),
++        )
++        return True
++
 +    @app.exception_handler(KeyError)
 +    async def missing_resource(request, exc):
 +        return JSONResponse({"detail": "Resource not found"}, status_code=404)
@@ -481,13 +606,43 @@ index 5e5d490..999739a 100644
 +
 +    @app.get("/capabilities")
 +    def capabilities():
-+        return {"real_money_enabled": False, "player_actions_enabled": False,
-+                "reason": "wallet_auth_required"}
++        enabled = bool(real_money and chain_writes_enabled and fair_randomness_v2)
++        return {
++            "realMoneyEnabled": enabled,
++            "real_money_enabled": enabled,
++            "chainWritesEnabled": chain_writes_enabled,
++            "walletAuthorization": "CANASINO-AUTH-V1",
++            "signedPlayerActions": True,
++            "player_actions_enabled": True,
++            "fairRandomnessV2": fair_randomness_v2,
++            "externalSigner": bool(signer_socket),
++            "reason": "fair_randomness_v2_pending" if not fair_randomness_v2 else None,
++        }
 +
      @app.get("/health")
      def health():
          return {"ok": True, "operator": operator.address, "rounds": len(manager.rounds),
-@@ -343,7 +515,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "rouletteRounds": len(roulette_manager.rounds), "dominoRounds": len(domino_manager.rounds),
+-                "pokerRounds": len(poker_manager.rounds)}
++                "pokerRounds": len(poker_manager.rounds), "chainWritesEnabled": chain_writes_enabled}
++
++    @app.get("/metrics", response_class=PlainTextResponse)
++    def metrics():
++        values = {
++            "canasino_chain_writes_enabled": int(chain_writes_enabled),
++            "canasino_real_money_enabled": int(real_money and chain_writes_enabled and fair_randomness_v2),
++            "canasino_open_bingo_rounds": manager.open_round_count(),
++            "canasino_open_roulette_rounds": roulette_manager.open_round_count(),
++            "canasino_open_domino_rounds": domino_manager.open_round_count(),
++            "canasino_open_poker_rounds": poker_manager.open_round_count(),
++            "canasino_reconcilable_wallet_operations": len(store.reconcilable_operations()),
++            "canasino_pending_chain_submissions": len(store.pending_chain_submissions()),
++        }
++        return "\n".join(f"# TYPE {name} gauge\n{name} {value}" for name, value in values.items()) + "\n"
+ 
+     @app.get("/rooms")
+     def rooms():
+@@ -343,7 +617,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          ]
  
      @app.get("/players/{address}/wallet")
@@ -496,7 +651,7 @@ index 5e5d490..999739a 100644
          """Available (on-chain account balance) + locked (escrowed in open
          rounds) + settled-round history, in one call for the Wallet screen."""
          addr = address.lower()
-@@ -356,11 +528,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -356,11 +630,11 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          }
  
      @app.get("/players/{address}/gems")
@@ -510,7 +665,7 @@ index 5e5d490..999739a 100644
          """Admin-only: there is no payment processor yet, so gems are normally
          minted by the operator once a real IAP clears. Requires the admin
          token — never reachable from client code without it."""
-@@ -407,11 +579,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -407,11 +681,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      # --- wallet-signed join support (FleetWallet bingo_join) ------------------
  
      @app.post("/rounds/{rid}/register")
@@ -534,7 +689,7 @@ index 5e5d490..999739a 100644
  
      @app.get("/rounds/{rid}/info")
      def round_info(rid: str):
-@@ -436,17 +617,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -436,17 +719,20 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/rounds/{rid}/card")
@@ -557,7 +712,7 @@ index 5e5d490..999739a 100644
          return store.history_for(address.lower(), limit)
  
      @app.get("/players/{address}/stats")
-@@ -454,7 +638,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -454,7 +740,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return store.stats_for(address.lower())
  
      @app.get("/leaderboard")
@@ -566,7 +721,7 @@ index 5e5d490..999739a 100644
          if period not in ("daily", "weekly", "monthly", "alltime"):
              period = "alltime"
          return store.leaderboard(period, limit)
-@@ -488,13 +672,21 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -488,13 +774,21 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      # --- wallet-signed bet support (mirrors Bingo's bingo_join path) -----------
  
      @app.post("/roulette/rounds/{rid}/register")
@@ -593,7 +748,7 @@ index 5e5d490..999739a 100644
  
      @app.get("/roulette/rounds/{rid}/info")
      def roulette_round_info(rid: str):
-@@ -519,7 +711,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -519,7 +813,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/roulette/history")
@@ -602,7 +757,7 @@ index 5e5d490..999739a 100644
          return store.roulette_history_for(address.lower(), limit)
  
      @app.websocket("/ws/roulette/{rid}")
-@@ -567,13 +759,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -567,13 +861,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return {"player": addr, "seat": domino_manager.rounds[rid].player_order.index(addr)}
  
      @app.post("/domino/rounds/{rid}/register")
@@ -628,7 +783,15 @@ index 5e5d490..999739a 100644
  
      @app.get("/domino/rounds/{rid}")
      def get_domino_round(rid: str):
-@@ -600,10 +798,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -589,6 +889,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "handSizes": [len(h) for h in engine.hands],
+                 "finished": engine.finished,
+             })
++            body["actionContext"] = domino_manager.action_context(rid)
+         return body
+ 
+     @app.get("/domino/rounds/{rid}/info")
+@@ -600,10 +901,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": domino_manager.bridge.query_url}
  
      @app.get("/domino/rounds/{rid}/hand")
@@ -641,7 +804,7 @@ index 5e5d490..999739a 100644
          hand = domino_manager.hand_for(rid, address.lower())
          return {"address": address.lower(), "hand": [list(t) for t in hand]}
  
-@@ -620,7 +816,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -620,20 +919,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/domino/history")
@@ -650,7 +813,28 @@ index 5e5d490..999739a 100644
          return store.domino_history_for(address.lower(), limit)
  
      @app.post("/domino/rounds/{rid}/move")
-@@ -709,13 +905,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+-    async def domino_move(rid: str, body: DominoMoveBody):
++    async def domino_move(rid: str, body: DominoMoveBody,
++                          authorization: str | None = Header(default=None)):
+         """Validates and applies one move server-side (not an on-chain tx --
+         only open/join are). Broadcasts the result to every connected
+         WS listener, and once the game ends, automatically settles on-chain
+         (the plugin independently replays the whole move log at settle, so
+         there's nothing left to trust here beyond what it re-derives itself)."""
+         tile = tuple(body.tile) if body.tile else None
++        wallet_action = authorize_wallet_action(
++            authorization, body=body, address=body.address.lower(), action="domino_move",
++            resource=f"domino-move:{rid}:{body.sequence}",
++        )
+         try:
+             result = await asyncio.to_thread(
+-                domino_manager.apply_move, rid, body.address.lower(), body.action, tile, body.end)
++                domino_manager.apply_move, rid, body.address.lower(), body.action, tile, body.end,
++                body.sequence if wallet_action else None, body.state_hash.lower() if wallet_action else None)
+         except edomino.IllegalMove as exc:
+             raise HTTPException(status_code=422, detail=f"illegal move: {exc}")
+         except ValueError as exc:
+@@ -709,13 +1014,19 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
          return {"player": addr, "seat": poker_manager.rounds[rid].player_order.index(addr)}
  
      @app.post("/poker/rounds/{rid}/register")
@@ -676,7 +860,15 @@ index 5e5d490..999739a 100644
  
      @app.get("/poker/rounds/{rid}")
      def get_poker_round(rid: str):
-@@ -748,9 +950,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -736,6 +1047,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+                 "allIn": engine.all_in,
+                 "finished": engine.finished,
+             })
++            body["actionContext"] = poker_manager.action_context(rid)
+         return body
+ 
+     @app.get("/poker/rounds/{rid}/info")
+@@ -748,9 +1060,8 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "rpcUrl": poker_manager.bridge.query_url}
  
      @app.get("/poker/rounds/{rid}/hand")
@@ -688,7 +880,7 @@ index 5e5d490..999739a 100644
          hole = poker_manager.hole_cards_for(rid, address.lower())
          return {"address": address.lower(), "hole": [list(c) for c in hole]}
  
-@@ -758,7 +959,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -758,7 +1069,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
      def poker_proof(rid: str):
          rnd = poker_manager.rounds[rid]
          settled = rnd.status == "settled"
@@ -697,7 +889,7 @@ index 5e5d490..999739a 100644
          return {"roundId": rid, "status": rnd.status, "commitment": rnd.commitment.hex(),
                  "seed": rnd.seed.hex() if settled else None,
                  "actions": rnd.actions if settled else None,
-@@ -770,7 +971,7 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
+@@ -770,20 +1081,26 @@ def create_app(bridge: CanopyBridge | None = None, store: Store | None = None) -
                  "blockHeight": rnd.settle_height if settled else None}
  
      @app.get("/players/{address}/poker/history")
@@ -706,6 +898,27 @@ index 5e5d490..999739a 100644
          return store.poker_history_for(address.lower(), limit)
  
      @app.post("/poker/rounds/{rid}/action")
+-    async def poker_action(rid: str, body: PokerActionBody):
++    async def poker_action(rid: str, body: PokerActionBody,
++                           authorization: str | None = Header(default=None)):
+         """Validates and applies one betting action server-side (not an
+         on-chain tx -- only open/join are). Broadcasts the result to every
+         connected WS listener, and once the hand ends, automatically settles
+         on-chain (the plugin independently replays the whole action log at
+         settle, so there's nothing left to trust here beyond what it
+         re-derives itself)."""
++        wallet_action = authorize_wallet_action(
++            authorization, body=body, address=body.address.lower(), action="poker_action",
++            resource=f"poker-action:{rid}:{body.sequence}",
++        )
+         try:
+             result = await asyncio.to_thread(
+-                poker_manager.apply_action, rid, body.address.lower(), body.action, body.amount)
++                poker_manager.apply_action, rid, body.address.lower(), body.action, body.amount,
++                body.sequence if wallet_action else None, body.state_hash.lower() if wallet_action else None)
+         except epoker.IllegalMove as exc:
+             raise HTTPException(status_code=422, detail=f"illegal action: {exc}")
+         except ValueError as exc:
 diff --git a/gameserver/auth.py b/gameserver/auth.py
 new file mode 100644
 index 0000000..4160f20
@@ -896,10 +1109,33 @@ index 0000000..4160f20
 +            raise AuthError("wallet authorization grant is invalid, expired, used or payload-mismatched")
 +        return operation
 diff --git a/gameserver/chain.py b/gameserver/chain.py
-index 44ddc65..3c28383 100644
+index 44ddc65..fea4009 100644
 --- a/gameserver/chain.py
 +++ b/gameserver/chain.py
-@@ -58,10 +58,18 @@ class Key:
+@@ -10,11 +10,13 @@ from __future__ import annotations
+ import hashlib
+ import json
+ import secrets
++import socket
+ import time
+ import urllib.request
+ from dataclasses import dataclass
++from typing import Protocol
+ 
+-from blspy import PrivateKey, BasicSchemeMPL
++from blspy import PrivateKey, BasicSchemeMPL, G1Element, G2Element
+ from google.protobuf import any_pb2
+ 
+ from . import tx_pb2
+@@ -51,17 +53,91 @@ TYPE_URL = {
+ class Key:
+     address: str      # hex
+     public_key: str   # hex
+-    private_key: str  # hex
++    private_key: str | None = None  # hex; absent when an external signer owns it
+ 
+     @property
+     def addr_bytes(self) -> bytes:
          return bytes.fromhex(self.address)
  
  
@@ -911,24 +1147,91 @@ index 44ddc65..3c28383 100644
 +    """The committed transaction does not match the authorized operation."""
 +
 +
++class TransactionSigner(Protocol):
++    def sign(self, signer: Key, message: bytes) -> bytes: ...
++
++
++class LocalKeySigner:
++    """Development signer. Real-money mode rejects this backend at startup."""
++
++    def sign(self, signer: Key, message: bytes) -> bytes:
++        if signer.private_key is None:
++            raise RuntimeError("private key is not available to the local signer")
++        sk = PrivateKey.from_bytes(bytes.fromhex(signer.private_key))
++        return bytes(BasicSchemeMPL.sign(sk, message))
++
++
++class UnixSocketSigner:
++    """Minimal local KMS/HSM boundary using newline-delimited JSON.
++
++    The signer receives only the public identity and exact bytes to sign.  The
++    game server verifies the returned BLS Basic signature locally, so a broken
++    or misrouted signer cannot substitute another key or payload.
++    """
++
++    def __init__(self, path: str, timeout: float = 5.0):
++        if not path:
++            raise ValueError("external signer socket path is required")
++        self.path = path
++        self.timeout = timeout
++
++    def sign(self, signer: Key, message: bytes) -> bytes:
++        request = json.dumps({
++            "version": "CANASINO-SIGNER-V1",
++            "address": signer.address,
++            "publicKey": signer.public_key,
++            "messageHex": message.hex(),
++        }, sort_keys=True, separators=(",", ":")).encode() + b"\n"
++        if len(request) > 65_536:
++            raise RuntimeError("signer request is too large")
++        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
++            client.settimeout(self.timeout)
++            client.connect(self.path)
++            client.sendall(request)
++            response = bytearray()
++            while not response.endswith(b"\n"):
++                chunk = client.recv(4096)
++                if not chunk:
++                    raise RuntimeError("external signer closed without a response")
++                response.extend(chunk)
++                if len(response) > 16_384:
++                    raise RuntimeError("external signer response is too large")
++        try:
++            body = json.loads(response)
++            if body.get("publicKey", "").lower() != signer.public_key.lower():
++                raise RuntimeError("external signer returned a different public key")
++            signature = bytes.fromhex(body["signature"])
++            public_key = bytes.fromhex(signer.public_key)
++            if len(signature) != 96 or len(public_key) != 48:
++                raise ValueError
++            if not BasicSchemeMPL.verify(G1Element.from_bytes(public_key), message,
++                                         G2Element.from_bytes(signature)):
++                raise RuntimeError("external signer returned an invalid signature")
++            return signature
++        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
++            raise RuntimeError("external signer returned an invalid response") from exc
++
++
  class CanopyBridge:
      def __init__(self, query_url="http://localhost:50102", admin_url="http://localhost:50103",
                   plugin_url="http://localhost:50110", network_id=1, chain_id=1, fee=10_000,
 -                 keystore_password="gameserver-pw"):
-+                 keystore_password="gameserver-pw", finality_confirmations=2):
++                 keystore_password="gameserver-pw", finality_confirmations=2,
++                 signer: TransactionSigner | None = None):
          self.query_url = query_url
          self.admin_url = admin_url
          self.plugin_url = plugin_url
-@@ -69,6 +77,8 @@ class CanopyBridge:
+@@ -69,6 +145,9 @@ class CanopyBridge:
          self.chain_id = chain_id
          self.fee = fee
          self.pwd = keystore_password
 +        self.finality_confirmations = finality_confirmations
++        self.signer = signer or LocalKeySigner()
 +        self.store = None
  
      # -- http ----------------------------------------------------------------
  
-@@ -117,26 +127,87 @@ class CanopyBridge:
+@@ -117,26 +196,97 @@ class CanopyBridge:
          tx.chain_id = self.chain_id
          return tx.SerializeToString()
  
@@ -938,9 +1241,21 @@ index 44ddc65..3c28383 100644
          height = self.height()
          tx_time = int(time.time() * 1_000_000)
          sign_bytes = self._sign_bytes(msg_type, type_url, msg_bytes, tx_time, height)
-         sk = PrivateKey.from_bytes(bytes.fromhex(signer.private_key))
-         sig = bytes(BasicSchemeMPL.sign(sk, sign_bytes))
+-        sk = PrivateKey.from_bytes(bytes.fromhex(signer.private_key))
+-        sig = bytes(BasicSchemeMPL.sign(sk, sign_bytes))
 -        tx = {
++        sig = self.signer.sign(signer, sign_bytes)
++        public_key_bytes = bytes.fromhex(signer.public_key)
++        try:
++            valid_signature = (
++                len(sig) == 96 and len(public_key_bytes) == 48 and
++                BasicSchemeMPL.verify(G1Element.from_bytes(public_key_bytes), sign_bytes,
++                                      G2Element.from_bytes(sig))
++            )
++        except (ValueError, RuntimeError):
++            valid_signature = False
++        if not valid_signature:
++            raise RuntimeError("transaction signer produced an invalid BLS signature")
 +        wire_tx = {
              "type": msg_type, "msgTypeUrl": type_url, "msgBytes": msg_bytes.hex(),
              "signature": {"publicKey": signer.public_key, "signature": sig.hex()},
@@ -1024,7 +1339,7 @@ index 44ddc65..3c28383 100644
  
      # -- typed transactions --------------------------------------------------
  
-@@ -145,10 +216,10 @@ class CanopyBridge:
+@@ -145,10 +295,10 @@ class CanopyBridge:
                                   recipient_address=bytes.fromhex(recipient), amount=amount)
          return self.submit_and_wait(signer, "faucet", m.SerializeToString())
  
@@ -1037,7 +1352,7 @@ index 44ddc65..3c28383 100644
  
      def buy_gems(self, admin: Key, recipient: str, amount: int):
          m = tx_pb2.MessageBuyGems(admin_address=admin.addr_bytes,
-@@ -156,54 +227,62 @@ class CanopyBridge:
+@@ -156,54 +306,62 @@ class CanopyBridge:
          return self.submit_and_wait(admin, "buy_gems", m.SerializeToString())
  
      def open_room(self, operator: Key, round_id: bytes, commitment: bytes, entry_fee: int,
@@ -1117,7 +1432,7 @@ index 44ddc65..3c28383 100644
          """`moves` is a list of (action, tile_low, tile_high, end) tuples --
          kept as plain tuples here (not domino.Move) so this bridge has no
          import dependency on the engine package."""
-@@ -211,31 +290,33 @@ class CanopyBridge:
+@@ -211,31 +369,33 @@ class CanopyBridge:
                          for a, lo, hi, e in moves]
          m = tx_pb2.MessageSettleDomino(operator_address=operator.addr_bytes, round_id=round_id,
                                         seed=seed, moves=proto_moves)
@@ -1158,7 +1473,7 @@ index 44ddc65..3c28383 100644
  
      def expire_poker(self, caller: Key, round_id: bytes):
          m = tx_pb2.MessageExpirePoker(caller_address=caller.addr_bytes, round_id=round_id)
-@@ -260,15 +341,74 @@ class CanopyBridge:
+@@ -260,15 +420,74 @@ class CanopyBridge:
              return None
  
      def wait_inclusion(self, sender_addr: str, tx_hash: str, timeout=150.0) -> bool:
@@ -1666,18 +1981,33 @@ index 95a5723..fe91c84 100644
  
          winner_set = set(winners)
 diff --git a/gameserver/domino_rooms.py b/gameserver/domino_rooms.py
-index 2895d4e..cdcf7ef 100644
+index 2895d4e..7319bb3 100644
 --- a/gameserver/domino_rooms.py
 +++ b/gameserver/domino_rooms.py
-@@ -15,6 +15,7 @@ gameserver (e.g. Bingo's card reveal) -- not a new gap introduced here.
+@@ -6,15 +6,18 @@ open round in memory (rebuilt from the persisted move log on restart) so
+ each move is validated the instant it's submitted, long before the round
+ ever touches the chain.
+ 
+-Move submission itself is NOT wallet-signed (only escrow -- open/join -- is
+-an on-chain tx). A move is a plain server call trusting the caller's address
+-claim, the same light-trust model already used everywhere else in this
+-gameserver (e.g. Bingo's card reveal) -- not a new gap introduced here.
++Player move submission is authorized by a one-use CANASINO-AUTH-V1 grant at
++the HTTP boundary. The signed payload includes the move sequence and hash of
++the complete prior public state, while this manager checks both atomically
++under the same lock that applies the move.
+ """
+ 
  from __future__ import annotations
  
++import hashlib
++import json
  import secrets
 +from threading import RLock
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional, Tuple
  
-@@ -23,6 +24,7 @@ from engine.rng import commitment
+@@ -23,6 +26,7 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
@@ -1685,7 +2015,7 @@ index 2895d4e..cdcf7ef 100644
  
  
  @dataclass
-@@ -73,6 +75,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -73,6 +77,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
  
  class DominoManager:
      def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
@@ -1694,7 +2024,7 @@ index 2895d4e..cdcf7ef 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -109,17 +113,20 @@ class DominoManager:
+@@ -109,17 +115,20 @@ class DominoManager:
              rnd.result = engine.result
          return engine
  
@@ -1716,7 +2046,7 @@ index 2895d4e..cdcf7ef 100644
      def join(self, round_id_hex: str, nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
-@@ -127,16 +134,23 @@ class DominoManager:
+@@ -127,16 +136,23 @@ class DominoManager:
          if len(rnd.participants) >= edomino.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          key = self.bridge.new_key(nickname or f"dplayer_{secrets.token_hex(3)}")
@@ -1742,15 +2072,53 @@ index 2895d4e..cdcf7ef 100644
          if len(rnd.participants) >= edomino.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -153,6 +167,7 @@ class DominoManager:
+@@ -153,8 +169,33 @@ class DominoManager:
      def player_index(self, rnd: DominoRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
++    def _action_context_unlocked(self, round_id_hex: str) -> dict:
++        rnd = self.rounds[round_id_hex]
++        engine = self.engines.get(round_id_hex)
++        state = {
++            "version": "CANASINO-STATE-V1",
++            "game": "domino",
++            "roundId": round_id_hex,
++            "players": rnd.player_order,
++            "sequence": len(rnd.moves),
++            "moves": rnd.moves,
++            "turn": engine.turn if engine and not engine.finished else None,
++            "ends": list(engine.ends) if engine and engine.ends else None,
++            "handSizes": [len(hand) for hand in engine.hands] if engine else None,
++            "boneyardRemaining": len(engine.boneyard) - engine.boneyard_idx if engine else None,
++            "finished": engine.finished if engine else False,
++        }
++        encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
++        return {"sequence": len(rnd.moves), "stateHash": hashlib.sha256(encoded).hexdigest()}
++
++    @synchronized
++    def action_context(self, round_id_hex: str) -> dict:
++        return self._action_context_unlocked(round_id_hex)
++
 +    @synchronized
      def apply_move(self, round_id_hex: str, address: str, action: str,
-                     tile: Optional[Tuple[int, int]] = None, end: Optional[str] = None):
+-                    tile: Optional[Tuple[int, int]] = None, end: Optional[str] = None):
++                    tile: Optional[Tuple[int, int]] = None, end: Optional[str] = None,
++                    expected_sequence: Optional[int] = None, expected_state_hash: Optional[str] = None):
          """Validates and applies one move. Raises engine.domino.IllegalMove on
-@@ -192,6 +207,7 @@ class DominoManager:
+         an illegal move, or ValueError if the round/turn state doesn't allow
+         one at all. Returns a GameResult once this move ends the game, else
+@@ -165,6 +206,10 @@ class DominoManager:
+         engine = self.engines.get(round_id_hex)
+         if engine is None:
+             raise ValueError("round does not have both players yet")
++        if expected_sequence is not None or expected_state_hash is not None:
++            context = self._action_context_unlocked(round_id_hex)
++            if expected_sequence != context["sequence"] or expected_state_hash != context["stateHash"]:
++                raise ValueError("signed move does not match the current round state")
+         idx = self.player_index(rnd, address)
+         if engine.turn != idx:
+             raise ValueError("not this address's turn")
+@@ -192,6 +237,7 @@ class DominoManager:
          return sum(rnd.entry_fee for rnd in self.rounds.values()
                     if rnd.status == "open" and addr in rnd.participants)
  
@@ -1758,7 +2126,7 @@ index 2895d4e..cdcf7ef 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          engine = self.engines[round_id_hex]
-@@ -201,7 +217,10 @@ class DominoManager:
+@@ -201,7 +247,10 @@ class DominoManager:
          before = {a: self.bridge.account_balance(a) for a in order}
          proto_moves = [(m["action"], (m["tile"] or [0, 0])[0], (m["tile"] or [0, 0])[1], m.get("end") or "")
                         for m in rnd.moves]
@@ -1771,18 +2139,34 @@ index 2895d4e..cdcf7ef 100644
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/poker_rooms.py b/gameserver/poker_rooms.py
-index 4014299..781cc1a 100644
+index 4014299..b771919 100644
 --- a/gameserver/poker_rooms.py
 +++ b/gameserver/poker_rooms.py
-@@ -16,6 +16,7 @@ a new gap introduced here.
+@@ -6,16 +6,18 @@ memory (rebuilt from the persisted action log on restart) so each action
+ is validated the instant it's submitted, long before the round ever
+ touches the chain.
+ 
+-Action submission itself is NOT wallet-signed (only escrow -- open/join --
+-is an on-chain tx). An action is a plain server call trusting the caller's
+-address claim, the same light-trust model already used everywhere else in
+-this gameserver (e.g. Bingo's card reveal, Domino's move submission) -- not
+-a new gap introduced here.
++Player action submission is authorized by a one-use CANASINO-AUTH-V1 grant at
++the HTTP boundary. The signed payload includes the action sequence and hash of
++the complete prior public state, while this manager checks both atomically
++under the same lock that applies the action.
+ """
+ 
  from __future__ import annotations
  
++import hashlib
++import json
  import secrets
 +from threading import RLock
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
  
-@@ -24,6 +25,7 @@ from engine.rng import commitment
+@@ -24,6 +26,7 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
@@ -1790,7 +2174,7 @@ index 4014299..781cc1a 100644
  
  
  @dataclass
-@@ -75,6 +77,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -75,6 +78,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
  
  class PokerManager:
      def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
@@ -1799,7 +2183,7 @@ index 4014299..781cc1a 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -113,11 +117,15 @@ class PokerManager:
+@@ -113,11 +118,15 @@ class PokerManager:
              rnd.result = engine.result
          return engine
  
@@ -1816,7 +2200,7 @@ index 4014299..781cc1a 100644
          rnd = PokerRound(round_id, seed, commit, small_blind, big_blind, buy_in, rake_bps)
          self.rounds[rnd.id_hex] = rnd
          if self.store is not None:
-@@ -125,6 +133,7 @@ class PokerManager:
+@@ -125,6 +134,7 @@ class PokerManager:
                                                small_blind, big_blind, buy_in, rake_bps)
          return rnd
  
@@ -1824,7 +2208,7 @@ index 4014299..781cc1a 100644
      def join(self, round_id_hex: str, nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
-@@ -132,16 +141,23 @@ class PokerManager:
+@@ -132,16 +142,23 @@ class PokerManager:
          if len(rnd.participants) >= epoker.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          key = self.bridge.new_key(nickname or f"pplayer_{secrets.token_hex(3)}")
@@ -1850,15 +2234,56 @@ index 4014299..781cc1a 100644
          if len(rnd.participants) >= epoker.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -158,6 +174,7 @@ class PokerManager:
+@@ -158,7 +175,36 @@ class PokerManager:
      def player_index(self, rnd: PokerRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
+-    def apply_action(self, round_id_hex: str, address: str, action: str, amount: int = 0):
++    def _action_context_unlocked(self, round_id_hex: str) -> dict:
++        rnd = self.rounds[round_id_hex]
++        engine = self.engines.get(round_id_hex)
++        state = {
++            "version": "CANASINO-STATE-V1",
++            "game": "poker",
++            "roundId": round_id_hex,
++            "players": rnd.player_order,
++            "sequence": len(rnd.actions),
++            "actions": rnd.actions,
++            "turn": engine.turn if engine and not engine.finished else None,
++            "street": engine.street if engine else None,
++            "board": [list(card) for card in engine.board_full[:engine.board_revealed]] if engine else None,
++            "pot": engine.pot if engine else None,
++            "streetContributed": engine.street_contributed if engine else None,
++            "stacks": engine.stacks if engine else None,
++            "folded": engine.folded if engine else None,
++            "allIn": engine.all_in if engine else None,
++            "finished": engine.finished if engine else False,
++        }
++        encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
++        return {"sequence": len(rnd.actions), "stateHash": hashlib.sha256(encoded).hexdigest()}
++
 +    @synchronized
-     def apply_action(self, round_id_hex: str, address: str, action: str, amount: int = 0):
++    def action_context(self, round_id_hex: str) -> dict:
++        return self._action_context_unlocked(round_id_hex)
++
++    @synchronized
++    def apply_action(self, round_id_hex: str, address: str, action: str, amount: int = 0,
++                     expected_sequence: Optional[int] = None, expected_state_hash: Optional[str] = None):
          """Validates and applies one betting action. Raises engine.poker.IllegalMove
          on an illegal action, or ValueError if the round/turn state doesn't
-@@ -198,6 +215,7 @@ class PokerManager:
+         allow one at all. Returns a HandResult once this action ends the
+@@ -171,6 +217,10 @@ class PokerManager:
+             raise ValueError("round does not have both players yet")
+         if engine.finished:
+             raise ValueError("hand already finished")
++        if expected_sequence is not None or expected_state_hash is not None:
++            context = self._action_context_unlocked(round_id_hex)
++            if expected_sequence != context["sequence"] or expected_state_hash != context["stateHash"]:
++                raise ValueError("signed action does not match the current round state")
+         idx = self.player_index(rnd, address)
+         if engine.turn != idx:
+             raise ValueError("not this address's turn")
+@@ -198,6 +248,7 @@ class PokerManager:
          return sum(rnd.buy_in for rnd in self.rounds.values()
                     if rnd.status == "open" and addr in rnd.participants)
  
@@ -1866,7 +2291,7 @@ index 4014299..781cc1a 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          engine = self.engines[round_id_hex]
-@@ -206,7 +224,10 @@ class PokerManager:
+@@ -206,7 +257,10 @@ class PokerManager:
          order = rnd.player_order
          before = {a: self.bridge.account_balance(a) for a in order}
          proto_actions = [(a["action"], a["amount"]) for a in rnd.actions]
@@ -2082,10 +2507,10 @@ index d44c9d7..7233291 100644
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/security.py b/gameserver/security.py
 new file mode 100644
-index 0000000..0734cd8
+index 0000000..38b161d
 --- /dev/null
 +++ b/gameserver/security.py
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,103 @@
 +"""Fail-closed transport policy until wallet-bound authentication is implemented.
 +
 +An address is public information, not proof of ownership. The operator bearer
@@ -2104,6 +2529,8 @@ index 0000000..0734cd8
 +WALLET_POST_PATHS = (
 +    re.compile(r"^/rounds/[0-9a-fA-F]{16}/register$"),
 +    re.compile(r"^/(?:roulette|domino|poker)/rounds/[0-9a-fA-F]{16}/register$"),
++    re.compile(r"^/domino/rounds/[0-9a-fA-F]{16}/move$"),
++    re.compile(r"^/poker/rounds/[0-9a-fA-F]{16}/action$"),
 +)
 +
 +
@@ -2235,7 +2662,7 @@ index 0000000..4fbd9e5
 +blspy==2.0.3
 +protobuf==7.36.1
 diff --git a/scripts_backup_canasino.sh b/scripts_backup_canasino.sh
-index d4afe85..e604548 100755
+index d4afe85..b349def 100755
 --- a/scripts_backup_canasino.sh
 +++ b/scripts_backup_canasino.sh
 @@ -3,6 +3,7 @@
@@ -2246,6 +2673,80 @@ index d4afe85..e604548 100755
  ROOT=/home/ubuntu/canasino
  OUT="$ROOT/backups"
  STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+@@ -16,20 +17,19 @@ src = sqlite3.connect(sys.argv[1])
+ dst = sqlite3.connect(sys.argv[2])
+ with dst:
+     src.backup(dst)
++result = dst.execute("PRAGMA integrity_check").fetchone()[0]
++if result != "ok":
++    raise SystemExit(f"backup integrity_check failed: {result}")
+ src.close(); dst.close()
+ PY
+ gzip -f "$OUT/canasino-$STAMP.db"
+ 
+ tar -czf "$OUT/source-$STAMP.tar.gz" -C "$ROOT" gameserver engine chain 2>/dev/null || true
++sha256sum "$OUT/canasino-$STAMP.db.gz" "$OUT/source-$STAMP.tar.gz" > "$OUT/manifest-$STAMP.sha256"
+ 
+ find "$OUT" -name 'canasino-*.db.gz' -mtime +14 -delete
+ find "$OUT" -name 'source-*.tar.gz' -mtime +14 -delete
++find "$OUT" -name 'manifest-*.sha256' -mtime +14 -delete
+ 
+-# Push the gameserver source to its off-box backup mirror (best-effort: a
+-# push failure shouldn't fail the whole backup job).
+-cd "$ROOT"
+-git add -A gameserver engine chain 2>/dev/null || true
+-if ! git diff --cached --quiet 2>/dev/null; then
+-  git commit -q -m "auto-backup: $STAMP" || true
+-fi
+-git push origin master >/dev/null 2>&1 || echo "WARN: git push to backup remote failed" >&2
++# Off-box replication belongs in a separately authenticated backup job.
++# Production backup code must never modify or push the source repository.
+diff --git a/scripts_verify_backup.sh b/scripts_verify_backup.sh
+new file mode 100755
+index 0000000..b7c4f28
+--- /dev/null
++++ b/scripts_verify_backup.sh
+@@ -0,0 +1,40 @@
++#!/bin/sh
++set -eu
++
++if [ "$#" -ne 1 ]; then
++  echo "usage: $0 /absolute/path/to/manifest-TIMESTAMP.sha256" >&2
++  exit 2
++fi
++
++MANIFEST=$1
++case "$MANIFEST" in
++  /*/manifest-*.sha256) ;;
++  *) echo "manifest must be an absolute manifest-*.sha256 path" >&2; exit 2 ;;
++esac
++
++BACKUP_DIR=$(dirname "$MANIFEST")
++cd "$BACKUP_DIR"
++sha256sum -c "$(basename "$MANIFEST")"
++
++DB_GZ=$(awk '/canasino-.*\.db\.gz$/ {print $2}' "$MANIFEST" | head -1)
++if [ -z "$DB_GZ" ] || [ ! -f "$DB_GZ" ]; then
++  echo "database archive missing from manifest" >&2
++  exit 1
++fi
++
++gzip -cd "$DB_GZ" | python3 -c '
++import os, sqlite3, sys, tempfile
++fd, path = tempfile.mkstemp(prefix="canasino-restore-", suffix=".db")
++try:
++    with os.fdopen(fd, "wb") as out:
++        while chunk := sys.stdin.buffer.read(1024 * 1024):
++            out.write(chunk)
++    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
++    result = db.execute("PRAGMA integrity_check").fetchone()[0]
++    db.close()
++    if result != "ok":
++        raise SystemExit(f"restore integrity_check failed: {result}")
++    print("RESTORE_VERIFY_OK")
++finally:
++    os.unlink(path)
++'
 diff --git a/tests/fakes.py b/tests/fakes.py
 index 167e85e..092efc3 100644
 --- a/tests/fakes.py
@@ -2576,6 +3077,69 @@ index 0000000..34b5300
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/tests/test_external_signer.py b/tests/test_external_signer.py
+new file mode 100644
+index 0000000..0bd3301
+--- /dev/null
++++ b/tests/test_external_signer.py
+@@ -0,0 +1,57 @@
++import os
++import unittest
++from unittest.mock import patch
++
++from blspy import BasicSchemeMPL
++
++from gameserver.app import create_app
++from gameserver.chain import CanopyBridge, Key
++
++
++class RecordingSigner:
++    def __init__(self, private_key, invalid=False):
++        self.private_key = private_key
++        self.invalid = invalid
++        self.messages = []
++
++    def sign(self, signer, message):
++        self.messages.append((signer.address, message))
++        if self.invalid:
++            return bytes(96)
++        return bytes(BasicSchemeMPL.sign(self.private_key, message))
++
++
++class ExternalSignerBoundaryTests(unittest.TestCase):
++    def setUp(self):
++        self.private_key = BasicSchemeMPL.key_gen(b"external-signer-test-seed-material")
++        public_key = bytes(self.private_key.get_g1())
++        import hashlib
++        self.key = Key(
++            address=hashlib.sha256(public_key).digest()[:20].hex(),
++            public_key=public_key.hex(), private_key=None,
++        )
++
++    def test_bridge_accepts_a_verified_external_signature_without_private_key(self):
++        signer = RecordingSigner(self.private_key)
++        bridge = CanopyBridge(signer=signer)
++        bridge.height = lambda: 123
++        wire, tx_hash = bridge._signed_transaction(self.key, "send", b"exact payload")
++        self.assertEqual(len(signer.messages), 1)
++        self.assertEqual(wire["signature"]["publicKey"], self.key.public_key)
++        self.assertEqual(len(wire["signature"]["signature"]), 192)
++        self.assertEqual(len(tx_hash), 64)
++
++    def test_bridge_rejects_an_invalid_external_signature(self):
++        bridge = CanopyBridge(signer=RecordingSigner(self.private_key, invalid=True))
++        bridge.height = lambda: 123
++        with self.assertRaisesRegex(RuntimeError, "invalid BLS signature"):
++            bridge._signed_transaction(self.key, "send", b"exact payload")
++
++    def test_real_money_mode_fails_closed_without_external_signer(self):
++        with patch.dict(os.environ, {"CASINO_REAL_MONEY_ENABLED": "true"}, clear=True):
++            with self.assertRaisesRegex(ValueError, "CASINO_SIGNER_SOCKET"):
++                create_app()
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tests/test_gameserver_app.py b/tests/test_gameserver_app.py
 index 39eef5c..7baec90 100644
 --- a/tests/test_gameserver_app.py
@@ -2757,6 +3321,180 @@ index d0d9b9e..9140c31 100644
  
      def test_register_also_validates_the_bet(self):
          rid = self.client.post("/roulette/rounds").json()["roundId"]
+diff --git a/tests/test_operational_controls.py b/tests/test_operational_controls.py
+new file mode 100644
+index 0000000..6eca3de
+--- /dev/null
++++ b/tests/test_operational_controls.py
+@@ -0,0 +1,42 @@
++import os
++import unittest
++from unittest.mock import patch
++
++from fastapi.testclient import TestClient
++
++from gameserver.app import create_app
++from gameserver.chain import CanopyBridge
++from gameserver.db import Store
++
++
++class OperationalControlsTests(unittest.TestCase):
++    def setUp(self):
++        env = patch.dict(os.environ, {"CASINO_ADMIN_TOKEN": "ops-test-token"}, clear=True)
++        env.start()
++        self.addCleanup(env.stop)
++        self.store = Store(":memory:")
++        bridge = CanopyBridge(query_url="http://real-node.invalid")
++        self.app = create_app(bridge=bridge, store=self.store)
++        self.client = TestClient(self.app)
++        self.addCleanup(self.client.close)
++        self.addCleanup(self.store.close)
++
++    def test_real_node_economic_writes_are_paused_by_default(self):
++        response = self.client.post("/rounds", json={"room": "classic"},
++                                    headers={"Authorization": "Bearer ops-test-token"})
++        self.assertEqual(response.status_code, 503)
++        self.assertEqual(response.json()["code"], "wagering_paused")
++
++    def test_capabilities_and_metrics_report_fail_closed_state(self):
++        capabilities = self.client.get("/capabilities").json()
++        self.assertFalse(capabilities["chainWritesEnabled"])
++        self.assertFalse(capabilities["realMoneyEnabled"])
++        self.assertTrue(capabilities["signedPlayerActions"])
++        metrics = self.client.get("/metrics")
++        self.assertEqual(metrics.status_code, 200)
++        self.assertIn("canasino_chain_writes_enabled 0", metrics.text)
++        self.assertIn("canasino_real_money_enabled 0", metrics.text)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_signed_player_actions.py b/tests/test_signed_player_actions.py
+new file mode 100644
+index 0000000..400ebe4
+--- /dev/null
++++ b/tests/test_signed_player_actions.py
+@@ -0,0 +1,120 @@
++"""Wallet-bound ordered action coverage for Poker and Domino.
++
++No chain or external service is touched.  Each test signs the exact
++CANASINO-AUTH-V1 challenge with a real BLS key and submits it through the
++public wallet route.
++"""
++
++import hashlib
++import os
++import unittest
++import uuid
++from unittest.mock import patch
++
++from blspy import BasicSchemeMPL
++from fastapi.testclient import TestClient
++
++from gameserver.app import create_app
++from gameserver.auth import payload_hash
++from gameserver.db import Store
++from tests.fakes import FakeBridge
++
++
++class SignedPlayerActionTests(unittest.TestCase):
++    def setUp(self):
++        env = patch.dict(os.environ, {
++            "CASINO_ADMIN_TOKEN": "signed-action-operator",
++            "CASINO_AUTH_DOMAIN": "test.canasino.invalid",
++        })
++        env.start()
++        self.addCleanup(env.stop)
++        self.store = Store(":memory:")
++        self.app = create_app(FakeBridge(), self.store)
++        self.client = TestClient(self.app)
++        self.addCleanup(self.client.close)
++        self.addCleanup(self.store.close)
++        self.keys = [
++            BasicSchemeMPL.key_gen(b"signed-action-player-one-seed-32"),
++            BasicSchemeMPL.key_gen(b"signed-action-player-two-seed-32"),
++        ]
++        self.addresses = [hashlib.sha256(bytes(key.get_g1())).digest()[:20].hex() for key in self.keys]
++
++    @property
++    def admin(self):
++        return {"Authorization": "Bearer signed-action-operator"}
++
++    def grant(self, *, key, address, action, resource, body):
++        challenge_response = self.client.post("/auth/challenges", json={
++            "address": address, "action": action, "resource": resource,
++            "payload_hash": payload_hash(body),
++        })
++        self.assertEqual(challenge_response.status_code, 200, challenge_response.text)
++        challenge = challenge_response.json()
++        signature = BasicSchemeMPL.sign(key, bytes.fromhex(challenge["messageHex"]))
++        verify_response = self.client.post("/auth/verify", json={
++            "challenge_id": challenge["challengeId"],
++            "public_key": bytes(key.get_g1()).hex(),
++            "signature": bytes(signature).hex(),
++        })
++        self.assertEqual(verify_response.status_code, 200, verify_response.text)
++        return verify_response.json()["grant"]
++
++    def test_domino_move_is_bound_to_player_sequence_and_prior_state(self):
++        rid = self.client.post("/domino/rounds", headers=self.admin).json()["roundId"]
++        manager = self.app.state.domino_manager
++        for address in self.addresses:
++            manager.register_external(rid, address)
++        context = manager.action_context(rid)
++        engine = manager.engines[rid]
++        first_tile = list(engine.hands[0][0])
++        body = {
++            "address": self.addresses[0], "operation_id": str(uuid.uuid4()),
++            "sequence": context["sequence"], "state_hash": context["stateHash"],
++            "action": "play", "tile": first_tile,
++        }
++        resource = f"domino-move:{rid}:0"
++        grant = self.grant(key=self.keys[0], address=self.addresses[0], action="domino_move",
++                           resource=resource, body=body)
++        response = self.client.post(f"/domino/rounds/{rid}/move", json=body,
++                                    headers={"Authorization": f"Canasino-Wallet {grant}"})
++        self.assertEqual(response.status_code, 200, response.text)
++        self.assertEqual(manager.action_context(rid)["sequence"], 1)
++
++        stale = {**body, "operation_id": str(uuid.uuid4())}
++        stale_grant = self.grant(key=self.keys[0], address=self.addresses[0], action="domino_move",
++                                 resource=resource, body=stale)
++        rejected = self.client.post(f"/domino/rounds/{rid}/move", json=stale,
++                                    headers={"Authorization": f"Canasino-Wallet {stale_grant}"})
++        self.assertEqual(rejected.status_code, 422, rejected.text)
++        self.assertIn("current round state", rejected.text)
++
++    def test_poker_action_is_bound_to_player_sequence_and_prior_state(self):
++        rid = self.client.post("/poker/rounds", headers=self.admin).json()["roundId"]
++        manager = self.app.state.poker_manager
++        for address in self.addresses:
++            manager.register_external(rid, address)
++        context = manager.action_context(rid)
++        turn = manager.engines[rid].turn
++        body = {
++            "address": self.addresses[turn], "operation_id": str(uuid.uuid4()),
++            "sequence": context["sequence"], "state_hash": context["stateHash"],
++            "action": "fold", "amount": 0,
++        }
++        resource = f"poker-action:{rid}:0"
++        grant = self.grant(key=self.keys[turn], address=self.addresses[turn], action="poker_action",
++                           resource=resource, body=body)
++        response = self.client.post(f"/poker/rounds/{rid}/action", json=body,
++                                    headers={"Authorization": f"Canasino-Wallet {grant}"})
++        self.assertEqual(response.status_code, 200, response.text)
++        self.assertTrue(response.json()["finished"])
++
++    def test_unsigned_browser_action_is_rejected_at_transport_boundary(self):
++        response = self.client.post(f"/poker/rounds/{'ab' * 8}/action", json={
++            "address": "cd" * 20, "action": "fold",
++        })
++        self.assertEqual(response.status_code, 401)
++        self.assertEqual(response.json()["code"], "wallet_auth_required")
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tests/test_wallet_auth.py b/tests/test_wallet_auth.py
 new file mode 100644
 index 0000000..fc9339e
