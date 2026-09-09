@@ -1089,22 +1089,31 @@ function DominoRoom({ account, onConnect }) {
     return () => window.clearInterval(id)
   }, [mode, roundId])
 
-  // The WS pushes one state frame on connect; if the engine wasn't built yet
-  // (2nd join still finalizing entropy) that frame carries turn=null. Poll the
-  // round until turn/ends are populated so the first move isn't deadlocked.
+  // The game WS is operator-gated, so a browser can't subscribe to it (403).
+  // Poll the round for turn/ends/boneyard and settlement while a table is live.
   useEffect(() => {
-    if (mode !== 'playing' || !roundId || turn != null) return undefined
+    if (mode !== 'playing' || !roundId) return undefined
     const id = window.setInterval(() => {
       getDominoRound(roundId).then((status) => {
-        if (status.turn != null || status.ends != null) {
-          setTurn(status.turn ?? 0)
-          setEnds(status.ends ?? null)
-          setBoneyardRemaining(status.boneyardRemaining ?? null)
+        if (status.turn != null) setTurn(status.turn)
+        if (status.ends !== undefined) setEnds(status.ends ?? null)
+        if (status.boneyardRemaining != null) setBoneyardRemaining(status.boneyardRemaining)
+        if (status.status === 'settled') {
+          // submitMove / the bot effect carry the rich settle result (address
+          // payouts); this only flips the view if that response was lost.
+          getDominoProof(roundId).then((p) => {
+            setProof(p)
+            setResult((prev) => prev || {
+              winners: (p.winners || []).map((s) => status.players?.[s]).filter(Boolean),
+              reason: p.reason, payouts: {},
+            })
+          }).catch(() => null)
+          setMode('settled')
         }
       }).catch(() => null)
-    }, 2500)
+    }, 2000)
     return () => window.clearInterval(id)
-  }, [mode, roundId, turn])
+  }, [mode, roundId])
 
   // The table creator (seat 0) joins before an opponent exists, so their hand
   // is not dealt until the second player triggers prepare_outcome. Fetch it
@@ -1143,17 +1152,22 @@ function DominoRoom({ account, onConnect }) {
           try { ({ hand } = await getDominoHand(roundId, botAddress)) }
           catch { await new Promise((r) => setTimeout(r, 2000)); continue }
           const playable = hand.find((tile) => (ends == null) || legalDominoEnds(tile, ends).length > 0)
+          let resp
           if (playable) {
             const outs = ends == null ? ['none'] : legalDominoEnds(playable, ends)
-            await botDominoMove(roundId, botAddress, 'play', playable, outs[0] === 'none' ? undefined : outs[0])
-            return
-          }
-          if (boneyard > 0) {
+            resp = await botDominoMove(roundId, botAddress, 'play', playable, outs[0] === 'none' ? undefined : outs[0])
+          } else if (boneyard > 0) {
             await botDominoMove(roundId, botAddress, 'draw')
             boneyard -= 1
             continue
+          } else {
+            resp = await botDominoMove(roundId, botAddress, 'pass')
           }
-          await botDominoMove(roundId, botAddress, 'pass')
+          if (resp?.settled && !cancelled) {
+            setResult(resp.settled)
+            setMode('settled')
+            getDominoProof(roundId).then(setProof).catch(() => null)
+          }
           return
         }
       } catch (err) {
@@ -1299,7 +1313,9 @@ function DominoRoom({ account, onConnect }) {
   async function submitMove(action, tile, end) {
     setError('')
     try {
-      const resp = await postDominoMove(roundId, account.address, action, tile, end)
+      // The signed move binds the current sequence + prior-state hash.
+      const { actionContext } = await getDominoRound(roundId)
+      const resp = await postDominoMove(roundId, account.address, actionContext, action, tile, end)
       if (action === 'play') {
         setMyHand((hand) => hand.filter((t) => !(t[0] === tile[0] && t[1] === tile[1])))
       } else if (action === 'draw') {
@@ -1307,6 +1323,12 @@ function DominoRoom({ account, onConnect }) {
         setMyHand(hand.hand)
       }
       setSelectedTile(null)
+      // Reflect the turn handoff immediately; the poll would catch up anyway.
+      getDominoRound(roundId).then((s) => {
+        if (s.turn != null) setTurn(s.turn)
+        setEnds(s.ends ?? null)
+        if (s.boneyardRemaining != null) setBoneyardRemaining(s.boneyardRemaining)
+      }).catch(() => null)
       if (resp.settled) {
         setMode('settled')
         setResult(resp.settled)
@@ -1503,18 +1525,27 @@ function PokerRoom({ account, onConnect }) {
     return () => window.clearInterval(id)
   }, [mode, roundId])
 
-  // The WS pushes one state frame on connect; if the engine wasn't built yet
-  // (2nd buy-in still finalizing entropy) that frame carries turn=null. Poll
-  // the round until the table is live so the first action isn't deadlocked.
+  // The game WS is operator-gated, so a browser can't subscribe to it (403).
+  // Poll the table state and settlement while a hand is live.
   useEffect(() => {
-    if (mode !== 'playing' || !roundId || table.turn != null) return undefined
+    if (mode !== 'playing' || !roundId) return undefined
     const id = window.setInterval(() => {
       getPokerRound(roundId).then((status) => {
-        if (status.turn != null) applyTable(status)
+        if (status.turn != null || status.finished) applyTable(status)
+        if (status.status === 'settled') {
+          getPokerProof(roundId).then((p) => {
+            setProof(p)
+            setResult((prev) => prev || {
+              winners: (p.winners || []).map((s) => status.players?.[s]).filter(Boolean),
+              reason: p.reason, payouts: {},
+            })
+          }).catch(() => null)
+          setMode('settled')
+        }
       }).catch(() => null)
-    }, 2500)
+    }, 2000)
     return () => window.clearInterval(id)
-  }, [mode, roundId, table.turn])
+  }, [mode, roundId])
 
   // The table creator (seat 0) buys in before an opponent exists, so their
   // hole cards are not dealt until the second player triggers prepare_outcome.
@@ -1547,7 +1578,14 @@ function PokerRoom({ account, onConnect }) {
     ;(async () => {
       try {
         await new Promise((r) => setTimeout(r, 700))
-        if (!cancelled) await botPokerAction(roundId, botAddress, 'check_call', 0)
+        if (cancelled) return
+        const resp = await botPokerAction(roundId, botAddress, 'check_call', 0)
+        getPokerRound(roundId).then(applyTable).catch(() => null)
+        if (resp?.settled && !cancelled) {
+          setResult(resp.settled)
+          setMode('settled')
+          getPokerProof(roundId).then(setProof).catch(() => null)
+        }
       } catch (err) {
         if (!cancelled) setError(err?.message || 'The practice opponent could not act.')
       } finally {
@@ -1698,7 +1736,9 @@ function PokerRoom({ account, onConnect }) {
   async function submitAction(action, amount = 0) {
     setError('')
     try {
-      const resp = await postPokerAction(roundId, account.address, action, amount)
+      // The signed action binds the current sequence + prior-state hash.
+      const { actionContext } = await getPokerRound(roundId)
+      const resp = await postPokerAction(roundId, account.address, actionContext, action, amount)
       getPokerRound(roundId).then(applyTable).catch(() => null)
       if (resp.settled) {
         setMode('settled')

@@ -40,9 +40,12 @@ export function getDominoHand(roundId, address) {
 
 export function postDominoMove(roundId, address, actionContext, action, tile, end) {
   const path = `/domino/rounds/${encodeURIComponent(roundId)}/move`
-  const payload = walletAction(address, actionContext, {
-    action, tile: tile || null, end: end || null,
-  })
+  // Only include tile/end when present -- the server hashes the grant payload
+  // with exclude_none, so a null here would not match its bound hash (401).
+  const fields = { action }
+  if (tile) fields.tile = tile
+  if (end) fields.end = end
+  const payload = walletAction(address, actionContext, fields)
   return walletAuthorizedPost({
     path, account: { address }, action: 'domino_move',
     resource: `domino-move:${roundId}:${payload.sequence}`, payload,
