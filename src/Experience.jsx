@@ -1084,6 +1084,27 @@ function DominoRoom({ account, onConnect }) {
     return () => window.clearInterval(id)
   }, [mode, roundId])
 
+  // The table creator (seat 0) joins before an opponent exists, so their hand
+  // is not dealt until the second player triggers prepare_outcome. Fetch it
+  // once the table is live, retrying while the entropy window finalizes (425).
+  useEffect(() => {
+    if (mode !== 'playing' || !roundId || !account || myHand.length > 0) return undefined
+    let cancelled = false
+    ;(async () => {
+      for (let attempt = 0; attempt < 40 && !cancelled; attempt++) {
+        try {
+          const hand = await getDominoHand(roundId, account.address)
+          if (!cancelled) setMyHand(hand.hand)
+          return
+        } catch (err) {
+          if (err?.status !== 425) { if (!cancelled) setError(err?.message || 'Could not load your hand.'); return }
+          await new Promise((r) => setTimeout(r, 3000))
+        }
+      }
+    })()
+    return () => { cancelled = true }
+  }, [mode, roundId, account, myHand.length])
+
   useEffect(() => {
     if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
     let ws
@@ -1118,7 +1139,7 @@ function DominoRoom({ account, onConnect }) {
     return () => { ws?.close(); socketRef.current = null }
   }, [mode, roundId])
 
-  async function performJoin(rid, info) {
+  async function performJoin(rid, info, { expectHand = false } = {}) {
     if (!account) { onConnect(); return false }
     try {
       await assertCanAfford(account.address, info.entryFee + 10000, 'this table')
@@ -1136,9 +1157,13 @@ function DominoRoom({ account, onConnect }) {
         await new Promise((resolve) => setTimeout(resolve, 5000))
         await registerDominoJoin(rid, account.address, signed?.txHash)
       }
-      for (let attempt = 0; attempt < 40; attempt++) {
-        try { const hand = await getDominoHand(rid, account.address); setMyHand(hand.hand); break }
-        catch (hErr) { if (hErr?.status !== 425) throw hErr; await new Promise((r) => setTimeout(r, 3000)) }
+      // Only the second player can expect a hand right away; the creator's
+      // hand is dealt later and picked up by the mode==='playing' effect.
+      if (expectHand) {
+        for (let attempt = 0; attempt < 40; attempt++) {
+          try { const hand = await getDominoHand(rid, account.address); setMyHand(hand.hand); break }
+          catch (hErr) { if (hErr?.status !== 425) throw hErr; await new Promise((r) => setTimeout(r, 3000)) }
+        }
       }
       setPhase('confirmed')
       return true
@@ -1182,7 +1207,7 @@ function DominoRoom({ account, onConnect }) {
         chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId), rpcUrl: info.rpcUrl,
       }
       setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
-      const ok = await performJoin(rid, infoObj)
+      const ok = await performJoin(rid, infoObj, { expectHand: true })
       if (ok) { setMySeat(1); setMode('playing') }
     } catch (err) {
       setError(err?.message || 'Could not find that table.')
@@ -1387,6 +1412,27 @@ function PokerRoom({ account, onConnect }) {
     return () => window.clearInterval(id)
   }, [mode, roundId])
 
+  // The table creator (seat 0) buys in before an opponent exists, so their
+  // hole cards are not dealt until the second player triggers prepare_outcome.
+  // Fetch them once the table is live, retrying through the entropy window (425).
+  useEffect(() => {
+    if (mode !== 'playing' || !roundId || !account || myHole.length > 0) return undefined
+    let cancelled = false
+    ;(async () => {
+      for (let attempt = 0; attempt < 40 && !cancelled; attempt++) {
+        try {
+          const hole = await getPokerHand(roundId, account.address)
+          if (!cancelled) setMyHole(hole.hole)
+          return
+        } catch (err) {
+          if (err?.status !== 425) { if (!cancelled) setError(err?.message || 'Could not load your hole cards.'); return }
+          await new Promise((r) => setTimeout(r, 3000))
+        }
+      }
+    })()
+    return () => { cancelled = true }
+  }, [mode, roundId, account, myHole.length])
+
   useEffect(() => {
     if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
     let ws
@@ -1426,7 +1472,7 @@ function PokerRoom({ account, onConnect }) {
     return () => { ws?.close(); socketRef.current = null }
   }, [mode, roundId])
 
-  async function performJoin(rid, info) {
+  async function performJoin(rid, info, { expectHand = false } = {}) {
     if (!account) { onConnect(); return false }
     try {
       await assertCanAfford(account.address, info.buyIn + 10000, 'this table buy-in')
@@ -1444,9 +1490,13 @@ function PokerRoom({ account, onConnect }) {
         await new Promise((resolve) => setTimeout(resolve, 5000))
         await registerPokerJoin(rid, account.address, signed?.txHash)
       }
-      for (let attempt = 0; attempt < 40; attempt++) {
-        try { const hole = await getPokerHand(rid, account.address); setMyHole(hole.hole); break }
-        catch (hErr) { if (hErr?.status !== 425) throw hErr; await new Promise((r) => setTimeout(r, 3000)) }
+      // Only the second player can expect hole cards right away; the creator's
+      // are dealt later and picked up by the mode==='playing' effect.
+      if (expectHand) {
+        for (let attempt = 0; attempt < 40; attempt++) {
+          try { const hole = await getPokerHand(rid, account.address); setMyHole(hole.hole); break }
+          catch (hErr) { if (hErr?.status !== 425) throw hErr; await new Promise((r) => setTimeout(r, 3000)) }
+        }
       }
       setPhase('confirmed')
       return true
@@ -1492,7 +1542,7 @@ function PokerRoom({ account, onConnect }) {
         rpcUrl: info.rpcUrl,
       }
       setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
-      const ok = await performJoin(rid, infoObj)
+      const ok = await performJoin(rid, infoObj, { expectHand: true })
       if (ok) { setMySeat(1); setMode('playing') }
     } catch (err) {
       setError(err?.message || 'Could not find that table.')
