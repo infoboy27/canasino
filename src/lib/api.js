@@ -73,15 +73,35 @@ export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = 
   } finally { clearTimeout(timer) }
 }
 
+// Operator-scoped writes (round open/settle, custodial domino/poker join). In a
+// production build this is a hard stub -- the backend's OperatorBoundary would
+// reject an unauthenticated browser anyway, and the operator bearer must never
+// ship to end users. A local valueless stack sets VITE_WAGERING_ENABLED and
+// VITE_OPERATOR_TOKEN in .env.local to drive the full lifecycle from the
+// browser against the isolated Canopy node.
+const OPERATOR_TOKEN = String(import.meta.env?.VITE_OPERATOR_TOKEN ?? '')
+
 /**
- * Legacy write response shape, retained for review of the disabled game flows.
  * @returns {Promise<{roundId?: string, round_id?: string, rakeBps?: number, minBet?: number, maxBet?: number, settled?: object}>}
  */
-export async function jsonPost(_path, _body = {}) {
-  // The current backend trusts public addresses for player actions. Do not
-  // send privileged credentials to the browser or silently retry writes.
+export async function jsonPost(path, body = {}) {
   requireWagering()
-  throw new Error('Verified wallet sessions are not implemented')
+  if (!OPERATOR_TOKEN) throw new Error('Verified wallet sessions are not implemented')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: 'POST', signal: controller.signal, credentials: 'omit', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPERATOR_TOKEN}` },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) throw Object.assign(new Error(statusMessage(response.status)), { status: response.status })
+    try { return await response.json() } catch { throw new Error('The game service returned an invalid response.') }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('The game service timed out. Please try again.', { cause: error })
+    if (error instanceof TypeError) throw new Error('Could not reach the game service. Check your connection.', { cause: error })
+    throw error
+  } finally { clearTimeout(timer) }
 }
 
 export function websocket(path) {
