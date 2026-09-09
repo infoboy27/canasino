@@ -275,8 +275,38 @@ Done and verified in containers (16-core local Docker; no host toolchain):
   plugin-computed winner's balance rise) passed **6/6** back to back, spins
   4/7/15/20/35, payout matching the computed winner every run.
 
+- **VDF hardening** — the reserved `vdf_output` is now populated and folded.
+  - `BeginBlock` resolves BOTH entropy inputs for the ledger entry at height
+    `H-1` from the FSM's committed index: the predecessor hash (as before) and
+    `LoadBlock(H-1).BlockHeader.Vdf.Output` — that block's own consensus VDF,
+    computed over the block before it. The applying header's VDF is over
+    `lastBlockHash` and is stapled on *after* the proposer computes the state
+    root, so it can never feed `BeginBlock` deterministically; the committed
+    predecessor's VDF can, and is identical for the proposer's simulation and
+    every validator.
+  - `encode_consensus_entropy` stores `hash || vdf_output` (VDF empty when the
+    block carried none; the fixed 32-byte hash prefix means `len == 32` reads
+    as "hash only"). `fold_consensus_entropy` already folds the whole ledger
+    value, so a full-window grind now needs an unbroken proposer run AND
+    beating an honest non-parallelizable delay on every block in the window.
+  - `CANASINO_REQUIRE_CONSENSUS_VDF` (plugin + game-server, off by default —
+    the valueless testnet's sub-second phases still produce a VDF per block,
+    but this is the production gate): settle fails closed unless every window
+    block carried a VDF, and the game-server refuses to derive such a window
+    up front.
+  - Game-server parity: `CanopyBridge.consensus_entropy_value(height)` returns
+    `hash || hex-decoded blockHeader.vdf.output` (Canopy's RPC hex-encodes the
+    same `Vdf.Output` bytes the FSM forwards); `derive_final_seed` folds those
+    values. Parity test + frozen vector updated. `test_fair_randomness_v2.py`
+    (plugin) adds: VDF persisted alongside the hash, the VDF term actually
+    changes the fold, require-mode fails closed on a hash-only window and on
+    one VDF-less block, require-mode settles when every block has a VDF.
+  - Verified: plugin suite **201/201**, game-server suite **241/241** in
+    isolated containers; `go build ./fsm ./lib` + `TestBeginBlock` /
+    `TestApplyBlock` / `TestEndBlock` green; the isolated-node E2E (fresh
+    chain, VDF present on every block) passed again with the VDF folded.
+
 Remaining before `fairRandomnessV2` / `realMoneyEnabled`:
 
-- **VDF hardening** — populate and verify the reserved `vdf_output` across the
-  plugin boundary so a full proposer-run is not the only grind barrier.
-- **Independent replay + review** of the whole close/reveal path (workstream 8).
+- **Independent replay + review** of the whole close/reveal path (workstream 8),
+  and a production decision on `ENTROPY_WINDOW_BLOCKS` / VDF target time.

@@ -59,10 +59,18 @@ index 9106452f..649ad2f5 100644
  # Protobuf generation
  proto: venv
 diff --git a/plugin/python/contract/contract.py b/plugin/python/contract/contract.py
-index 4cac30a0..0df73e41 100644
+index 4cac30a0..ef2758a1 100644
 --- a/plugin/python/contract/contract.py
 +++ b/plugin/python/contract/contract.py
-@@ -46,6 +46,7 @@ from .proto import account_pb2, event_pb2, plugin_pb2, tx_pb2
+@@ -5,6 +5,7 @@ This file contains the base contract implementation that handles the 'send' tran
+ Matches Go's contract/contract.go structure.
+ """
+ 
++import os
+ import random
+ import struct
+ import hashlib
+@@ -46,6 +47,7 @@ from .proto import account_pb2, event_pb2, plugin_pb2, tx_pb2
  from google.protobuf import any_pb2
  from .proto.tx_pb2 import (
      MessageOpenRoom,
@@ -70,7 +78,7 @@ index 4cac30a0..0df73e41 100644
      MessageJoinRoom,
      MessageSettleRoom,
      MessageExpireRoom,
-@@ -60,17 +61,20 @@ from .proto.tx_pb2 import (
+@@ -60,17 +62,20 @@ from .proto.tx_pb2 import (
      GemBalance,
      Cosmetic,
      MessageOpenRoulette,
@@ -91,7 +99,7 @@ index 4cac30a0..0df73e41 100644
      MessageJoinPoker,
      MessageSettlePoker,
      MessageExpirePoker,
-@@ -100,18 +104,36 @@ from .error import (
+@@ -100,18 +105,47 @@ from .error import (
  # isn't punished, short enough that abandoned rooms don't lock funds for long.
  ROOM_EXPIRY_BLOCKS = 720
  
@@ -112,6 +120,17 @@ index 4cac30a0..0df73e41 100644
 +# blocks after entropy_end before MessageExpire* can refund an unsettled round.
 +SETTLE_GRACE_BLOCKS = 720
 +
++# VDF hardening. The FSM folds each predecessor block's consensus VDF output
++# (over the block before it) into that block's ledger entry alongside its hash,
++# so a full-window grind needs an unbroken proposer run AND beating an honest
++# non-parallelizable delay. When this is set, settle fails closed unless every
++# block in a round's window carried a VDF output. It is off by default because
++# the valueless testnet runs sub-second consensus phases that leave no time for
++# a VDF; real-money deployments set CANASINO_REQUIRE_CONSENSUS_VDF=1. Tests
++# override the module attribute directly.
++REQUIRE_CONSENSUS_VDF = os.environ.get(
++    "CANASINO_REQUIRE_CONSENSUS_VDF", "").strip().lower() in ("1", "true", "yes")
++
  
  # Plugin configuration (matching Go's ContractConfig)
  CONTRACT_CONFIG = {
@@ -129,7 +148,7 @@ index 4cac30a0..0df73e41 100644
          "type.googleapis.com/types.MessageJoinRoom",
          "type.googleapis.com/types.MessageSettleRoom",
          "type.googleapis.com/types.MessageExpireRoom",
-@@ -122,20 +144,23 @@ CONTRACT_CONFIG = {
+@@ -122,20 +156,23 @@ CONTRACT_CONFIG = {
          "type.googleapis.com/types.MessageBuyCosmetic",
          "type.googleapis.com/types.MessageTransferCosmetic",
          "type.googleapis.com/types.MessageOpenRoulette",
@@ -154,7 +173,7 @@ index 4cac30a0..0df73e41 100644
      # Include google/protobuf/any.proto first as it's a dependency of event.proto and tx.proto
      "file_descriptor_protos": [
          any_pb2.DESCRIPTOR.serialized_pb,
-@@ -317,6 +342,11 @@ def domino_escrow_address(round_id: bytes) -> bytes:
+@@ -317,6 +354,11 @@ def domino_escrow_address(round_id: bytes) -> bytes:
  
  
  POKER_ROUND_PREFIX = b"\x75"  # 117
@@ -166,7 +185,7 @@ index 4cac30a0..0df73e41 100644
  
  
  def key_for_poker_round(round_id: bytes) -> bytes:
-@@ -326,6 +356,37 @@ def key_for_poker_round(round_id: bytes) -> bytes:
+@@ -326,6 +368,39 @@ def key_for_poker_round(round_id: bytes) -> bytes:
      return join_len_prefix(POKER_ROUND_PREFIX, round_id)
  
  
@@ -177,8 +196,10 @@ index 4cac30a0..0df73e41 100644
 +
 +
 +def encode_consensus_entropy(last_block_hash: bytes, vdf_output: bytes) -> bytes:
-+    """Ledger value: the 32-byte predecessor hash followed by the (currently
-+    empty) VDF output. Fixed 32-byte hash prefix means no separator is needed."""
++    """Ledger value: the 32-byte predecessor hash followed by that block's
++    consensus VDF output (empty when the block carried no VDF). The fixed
++    32-byte hash prefix means no separator is needed, and `len == 32` reads as
++    "hash only, no VDF"."""
 +    return bytes(last_block_hash) + bytes(vdf_output)
 +
 +
@@ -204,7 +225,7 @@ index 4cac30a0..0df73e41 100644
  def poker_escrow_address(round_id: bytes) -> bytes:
      """Deterministic 20-byte account address holding a poker round's escrow.
      Distinct salt so it never collides with Bingo's/Roulette's/Domino's escrow
-@@ -333,6 +394,30 @@ def poker_escrow_address(round_id: bytes) -> bytes:
+@@ -333,6 +408,30 @@ def poker_escrow_address(round_id: bytes) -> bytes:
      return hashlib.sha256(b"poker-escrow" + bytes(round_id)).digest()[:20]
  
  
@@ -235,7 +256,7 @@ index 4cac30a0..0df73e41 100644
  class Contract:
      """
      Contract defines the smart contract that implements the extended logic of the nested chain.
-@@ -355,9 +440,162 @@ class Contract:
+@@ -355,9 +454,171 @@ class Contract:
          """Genesis implements logic to import a json file to create the state at height 0."""
          return PluginGenesisResponse()
  
@@ -243,13 +264,15 @@ index 4cac30a0..0df73e41 100644
 -        """BeginBlock is code that is executed at the start of applying the block."""
 -        return PluginBeginResponse()
 +    async def begin_block(self, request: PluginBeginRequest) -> PluginBeginResponse:
-+        """Persist the FSM-authenticated predecessor block hash as the entropy
-+        ledger entry for height-1 (see audit/specs/fair-randomness-v2.md A.3).
++        """Persist the FSM-authenticated predecessor entropy -- block H-1's hash
++        and its consensus VDF output (empty when that block carried no VDF) --
++        as the ledger entry for height-1 (see audit/specs/fair-randomness-v2.md
++        A.2/A.3). Both come from the FSM's committed index, so the value is
++        identical for the proposer's simulation and every validator.
 +
-+        At block H the hash belongs to committed block H-1. Height 0 is a
-+        harmless unit-test/default request and height 1 has no predecessor. A
-+        post-upgrade FSM that omits or corrupts the hash fails closed so a
-+        settle can never consume unauthenticated entropy.
++        Height 0 is a harmless unit-test/default request and height 1 has no
++        predecessor. A post-upgrade FSM that omits or corrupts the hash fails
++        closed so a settle can never consume unauthenticated entropy.
 +        """
 +        response = PluginBeginResponse()
 +        try:
@@ -290,7 +313,9 @@ index 4cac30a0..0df73e41 100644
 +        """Read heights [entropy_start, entropy_end] from the entropy ledger and
 +        fold them into one 32-byte value. Returns (entropy, None) on success or
 +        (None, PluginError) if any block in the window is missing -- settle then
-+        fails closed rather than guessing.
++        fails closed rather than guessing. When `REQUIRE_CONSENSUS_VDF` is set,
++        a window block whose ledger entry is hash-only (no VDF output) is also
++        treated as unavailable.
 +
 +        The window is small (ENTROPY_WINDOW_BLOCKS), so this is a plain
 +        multi-key read; no range scan needed.
@@ -316,6 +341,11 @@ index 4cac30a0..0df73e41 100644
 +                return None, PluginError(
 +                    1, "canasino",
 +                    f"consensus entropy for height {h} is not available",
++                )
++            if REQUIRE_CONSENSUS_VDF and len(v) == 32:
++                return None, PluginError(
++                    1, "canasino",
++                    f"consensus VDF for height {h} is not available",
 +                )
 +            window.append(v)
 +        return fold_consensus_entropy(window), None
@@ -401,7 +431,7 @@ index 4cac30a0..0df73e41 100644
  
      async def check_tx(self, request: PluginCheckRequest) -> PluginCheckResponse:
          """CheckTx is code that is executed to statelessly validate a transaction."""
-@@ -409,6 +647,10 @@ class Contract:
+@@ -409,6 +670,10 @@ class Contract:
                  msg = MessageOpenRoom()
                  msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_open_room(msg)
@@ -412,7 +442,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageJoinRoom"):
                  msg = MessageJoinRoom()
                  msg.ParseFromString(request.tx.msg.value)
-@@ -442,6 +684,9 @@ class Contract:
+@@ -442,6 +707,9 @@ class Contract:
              elif type_url.endswith("/types.MessageOpenRoulette"):
                  msg = MessageOpenRoulette(); msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_open_roulette(msg)
@@ -422,7 +452,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageRouletteBet"):
                  msg = MessageRouletteBet(); msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_roulette_bet(msg)
-@@ -454,6 +699,9 @@ class Contract:
+@@ -454,6 +722,9 @@ class Contract:
              elif type_url.endswith("/types.MessageOpenDomino"):
                  msg = MessageOpenDomino(); msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_open_domino(msg)
@@ -432,7 +462,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageJoinDomino"):
                  msg = MessageJoinDomino(); msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_join_domino(msg)
-@@ -466,6 +714,9 @@ class Contract:
+@@ -466,6 +737,9 @@ class Contract:
              elif type_url.endswith("/types.MessageOpenPoker"):
                  msg = MessageOpenPoker(); msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_open_poker(msg)
@@ -442,7 +472,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageJoinPoker"):
                  msg = MessageJoinPoker(); msg.ParseFromString(request.tx.msg.value)
                  return self._check_message_join_poker(msg)
-@@ -512,6 +763,11 @@ class Contract:
+@@ -512,6 +786,11 @@ class Contract:
                  msg = MessageOpenRoom()
                  msg.ParseFromString(request.tx.msg.value)
                  return await self._deliver_message_open_room(msg, request.height)
@@ -454,7 +484,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageJoinRoom"):
                  msg = MessageJoinRoom()
                  msg.ParseFromString(request.tx.msg.value)
-@@ -519,7 +775,7 @@ class Contract:
+@@ -519,7 +798,7 @@ class Contract:
              elif type_url.endswith("/types.MessageSettleRoom"):
                  msg = MessageSettleRoom()
                  msg.ParseFromString(request.tx.msg.value)
@@ -463,7 +493,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageExpireRoom"):
                  msg = MessageExpireRoom()
                  msg.ParseFromString(request.tx.msg.value)
-@@ -545,36 +801,48 @@ class Contract:
+@@ -545,36 +824,48 @@ class Contract:
              elif type_url.endswith("/types.MessageOpenRoulette"):
                  msg = MessageOpenRoulette(); msg.ParseFromString(request.tx.msg.value)
                  return await self._deliver_message_open_roulette(msg, request.height)
@@ -515,7 +545,7 @@ index 4cac30a0..0df73e41 100644
              elif type_url.endswith("/types.MessageExpirePoker"):
                  msg = MessageExpirePoker(); msg.ParseFromString(request.tx.msg.value)
                  return await self._deliver_message_expire_poker(msg, request.height)
-@@ -620,6 +888,7 @@ class Contract:
+@@ -620,6 +911,7 @@ class Contract:
  
      async def _deliver_message_send(self, msg: MessageSend, fee: int, memo: str) -> PluginDeliverResponse:
          """DeliverMessageSend handles a 'send' message."""
@@ -523,7 +553,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
  
-@@ -759,6 +1028,7 @@ class Contract:
+@@ -759,6 +1051,7 @@ class Contract:
  
      async def _deliver_message_faucet(self, msg: MessageFaucet) -> PluginDeliverResponse:
          """Mint tokens to recipient (no balance check, no fee) and track a Faucet record."""
@@ -531,7 +561,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          acct_qid = random.randint(0, 2**53)
-@@ -804,6 +1074,7 @@ class Contract:
+@@ -804,6 +1097,7 @@ class Contract:
  
      async def _deliver_message_reward(self, msg: MessageReward, fee: int) -> PluginDeliverResponse:
          """Admin pays the fee; mint tokens to recipient and track a Reward record."""
@@ -539,7 +569,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          admin_qid = random.randint(0, 2**53)
-@@ -871,6 +1142,8 @@ class Contract:
+@@ -871,6 +1165,8 @@ class Contract:
      def _check_message_open_room(self, msg) -> PluginCheckResponse:
          if len(msg.operator_address) != 20:
              raise err_invalid_address()
@@ -548,7 +578,7 @@ index 4cac30a0..0df73e41 100644
          if not msg.round_id:
              raise PluginError(1, "plugin", "empty round_id")
          if len(msg.commitment) != 32:
-@@ -881,6 +1154,10 @@ class Contract:
+@@ -881,6 +1177,10 @@ class Contract:
              raise PluginError(1, "plugin", "rake_bps must be <= 10000")
          if len(msg.payout_weights_bps) > 0 and sum(msg.payout_weights_bps) != 10000:
              raise PluginError(1, "plugin", "payout_weights_bps must sum to 10000")
@@ -559,7 +589,7 @@ index 4cac30a0..0df73e41 100644
          r = PluginCheckResponse()
          r.authorized_signers.append(msg.operator_address)
          return r
-@@ -905,6 +1182,10 @@ class Contract:
+@@ -905,6 +1205,10 @@ class Contract:
              raise PluginError(1, "plugin", "empty round_id")
          if not msg.seed:
              raise PluginError(1, "plugin", "empty seed")
@@ -570,7 +600,7 @@ index 4cac30a0..0df73e41 100644
          r = PluginCheckResponse()
          r.authorized_signers.append(msg.operator_address)
          return r
-@@ -922,14 +1203,14 @@ class Contract:
+@@ -922,14 +1226,14 @@ class Contract:
          return r
  
      async def _deliver_message_open_room(self, msg, height: int = 0) -> PluginDeliverResponse:
@@ -588,7 +618,7 @@ index 4cac30a0..0df73e41 100644
          rr = RoomRound()
          rr.round_id = msg.round_id
          rr.operator_address = msg.operator_address
-@@ -941,8 +1222,9 @@ class Contract:
+@@ -941,8 +1245,9 @@ class Contract:
          rr.status = 0
          rr.payout_weights_bps.extend(list(msg.payout_weights_bps) or [10000])
          rr.opened_height = height
@@ -599,7 +629,7 @@ index 4cac30a0..0df73e41 100644
          out = PluginDeliverResponse()
          if w.HasField("error"):
              out.error.CopyFrom(w.error)
-@@ -953,6 +1235,7 @@ class Contract:
+@@ -953,6 +1258,7 @@ class Contract:
          within ROOM_EXPIRY_BLOCKS. Each participant gets back exactly what
          their own RoomParticipant record says they put in -- not a recomputed
          guess -- so this can't over- or under-pay regardless of who calls it."""
@@ -607,7 +637,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_round(msg.round_id)
-@@ -962,10 +1245,7 @@ class Contract:
+@@ -962,10 +1268,7 @@ class Contract:
          rr = unmarshal(RoomRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -619,7 +649,7 @@ index 4cac30a0..0df73e41 100644
  
          participant_addrs = [bytes(a) for a in rr.participant_addresses]
          escrow_key = key_for_account(escrow_address(msg.round_id))
-@@ -995,8 +1275,14 @@ class Contract:
+@@ -995,8 +1298,14 @@ class Contract:
              amount = part.amount if part else 0
              if amount <= 0:
                  continue
@@ -634,7 +664,7 @@ index 4cac30a0..0df73e41 100644
              acct.amount += amount
              total_refunded += amount
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
-@@ -1005,6 +1291,11 @@ class Contract:
+@@ -1005,6 +1314,11 @@ class Contract:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= total_refunded
          sets.append(PluginSetOp(key=escrow_key, value=marshal(escrow)))
@@ -646,7 +676,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 2  # expired/refunded
          sets.append(PluginSetOp(key=round_key, value=marshal(rr)))
  
-@@ -1015,6 +1306,7 @@ class Contract:
+@@ -1015,6 +1329,7 @@ class Contract:
          return out
  
      async def _deliver_message_join_room(self, msg) -> PluginDeliverResponse:
@@ -654,7 +684,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_round(msg.round_id)
-@@ -1045,10 +1337,17 @@ class Contract:
+@@ -1045,10 +1360,17 @@ class Contract:
              raise PluginError(1, "plugin", "round not found")
          if rr.status != 0:
              raise PluginError(1, "plugin", "round not open")
@@ -672,7 +702,7 @@ index 4cac30a0..0df73e41 100644
          if player.amount < msg.amount:
              raise err_insufficient_funds()
          player.amount -= msg.amount
-@@ -1073,10 +1372,14 @@ class Contract:
+@@ -1073,10 +1395,14 @@ class Contract:
              out.error.CopyFrom(w.error)
          return out
  
@@ -691,7 +721,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_round(msg.round_id)
-@@ -1086,14 +1389,14 @@ class Contract:
+@@ -1086,14 +1412,14 @@ class Contract:
          rr = unmarshal(RoomRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -710,7 +740,7 @@ index 4cac30a0..0df73e41 100644
          order = gdraw.draw_order(seed)
          pattern = grules.Pattern(msg.pattern or "line")
          ranked = []
-@@ -1144,13 +1447,23 @@ class Contract:
+@@ -1144,13 +1470,23 @@ class Contract:
          if escrow.amount < total:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= total
@@ -735,7 +765,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 1
          sets.append(PluginSetOp(key=round_key, value=marshal(rr)))
          w = await self.plugin.state_write(self, PluginStateWriteRequest(sets=sets))
-@@ -1175,6 +1488,8 @@ class Contract:
+@@ -1175,6 +1511,8 @@ class Contract:
          # "operate" a room), not something to carry into a new message type.
          if msg.operator_address not in ADMIN_ADDRESSES:
              raise err_unauthorized_signer()
@@ -744,7 +774,7 @@ index 4cac30a0..0df73e41 100644
          r = PluginCheckResponse()
          r.authorized_signers.append(msg.operator_address)
          return r
-@@ -1216,14 +1531,14 @@ class Contract:
+@@ -1216,14 +1554,14 @@ class Contract:
          return r
  
      async def _deliver_message_open_roulette(self, msg, height: int = 0) -> PluginDeliverResponse:
@@ -762,7 +792,7 @@ index 4cac30a0..0df73e41 100644
          rr = RouletteRound()
          rr.round_id = msg.round_id
          rr.operator_address = msg.operator_address
-@@ -1232,30 +1547,34 @@ class Contract:
+@@ -1232,30 +1570,34 @@ class Contract:
          rr.pot_total = 0
          rr.status = 0
          rr.opened_height = height
@@ -800,7 +830,7 @@ index 4cac30a0..0df73e41 100644
          for r in resp.results:
              if r.query_id == qr:
                  rb = r.entries[0].value if r.entries else None
-@@ -1265,19 +1584,35 @@ class Contract:
+@@ -1265,19 +1607,35 @@ class Contract:
                  plb = r.entries[0].value if r.entries else None
              elif r.query_id == qe:
                  eb = r.entries[0].value if r.entries else None
@@ -840,7 +870,7 @@ index 4cac30a0..0df73e41 100644
          rr.pot_total += msg.amount
          rr.bettor_addresses.append(msg.player_address)
          bet = RouletteBetRecord()
-@@ -1286,26 +1621,30 @@ class Contract:
+@@ -1286,26 +1644,30 @@ class Contract:
          bet.bet_type = msg.bet_type
          bet.bet_number = msg.bet_number
          bet.amount = msg.amount
@@ -883,7 +913,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_roulette_round(msg.round_id)
-@@ -1315,14 +1654,14 @@ class Contract:
+@@ -1315,14 +1677,14 @@ class Contract:
          rr = unmarshal(RouletteRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -901,7 +931,7 @@ index 4cac30a0..0df73e41 100644
          bettors = [bytes(a) for a in rr.bettor_addresses]
  
          escrow_key = key_for_account(roulette_escrow_address(msg.round_id))
-@@ -1363,7 +1702,10 @@ class Contract:
+@@ -1363,7 +1725,10 @@ class Contract:
              rake = gross * rr.rake_bps // 10000
              net = gross - rake
              acct_bytes = by_qid.get(acct_qids[addr])
@@ -913,7 +943,7 @@ index 4cac30a0..0df73e41 100644
              acct.amount += net
              total_gross_to_winners += gross
              total_rake += rake
-@@ -1378,16 +1720,26 @@ class Contract:
+@@ -1378,16 +1743,26 @@ class Contract:
          # rather than paying out from nothing.
          if escrow.amount >= total_gross_to_winners:
              house_take = escrow.amount - total_gross_to_winners  # losing stakes -> pure house profit
@@ -941,7 +971,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 1
          rr.seed = msg.seed
          rr.spin = spin
-@@ -1403,6 +1755,7 @@ class Contract:
+@@ -1403,6 +1778,7 @@ class Contract:
          """Refund every escrowed bet for a round the operator never settled
          within ROOM_EXPIRY_BLOCKS. Each bettor gets back exactly what their own
          RouletteBetRecord says they staked -- not a recomputed guess."""
@@ -949,7 +979,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_roulette_round(msg.round_id)
-@@ -1412,15 +1765,15 @@ class Contract:
+@@ -1412,15 +1788,15 @@ class Contract:
          rr = unmarshal(RouletteRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -970,7 +1000,7 @@ index 4cac30a0..0df73e41 100644
          bet_qids, acct_qids = [], {}
          for addr in bettors:
              bq = random.randint(0, 2**53)
-@@ -1436,6 +1789,7 @@ class Contract:
+@@ -1436,6 +1812,7 @@ class Contract:
          for r in resp.results:
              by_qid[r.query_id] = r.entries[0].value if r.entries else None
          escrow = unmarshal(Account, by_qid.get(qe)) if by_qid.get(qe) else Account()
@@ -978,7 +1008,7 @@ index 4cac30a0..0df73e41 100644
  
          sets = []
          total_refunded = 0
-@@ -1446,15 +1800,30 @@ class Contract:
+@@ -1446,15 +1823,30 @@ class Contract:
              if amount <= 0:
                  continue
              acct_bytes = by_qid.get(acct_qids[addr])
@@ -1011,7 +1041,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 2  # expired/refunded
          sets.append(PluginSetOp(key=round_key, value=marshal(rr)))
  
-@@ -1479,6 +1848,8 @@ class Contract:
+@@ -1479,6 +1871,8 @@ class Contract:
              raise PluginError(1, "plugin", "rake_bps must be <= 10000")
          if msg.operator_address not in ADMIN_ADDRESSES:
              raise err_unauthorized_signer()
@@ -1020,7 +1050,7 @@ index 4cac30a0..0df73e41 100644
          r = PluginCheckResponse()
          r.authorized_signers.append(msg.operator_address)
          return r
-@@ -1520,14 +1891,14 @@ class Contract:
+@@ -1520,14 +1914,14 @@ class Contract:
          return r
  
      async def _deliver_message_open_domino(self, msg, height: int = 0) -> PluginDeliverResponse:
@@ -1038,7 +1068,7 @@ index 4cac30a0..0df73e41 100644
          rr = DominoRound()
          rr.round_id = msg.round_id
          rr.operator_address = msg.operator_address
-@@ -1537,14 +1908,16 @@ class Contract:
+@@ -1537,14 +1931,16 @@ class Contract:
          rr.escrow_total = 0
          rr.status = 0
          rr.opened_height = height
@@ -1056,7 +1086,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1571,6 +1944,8 @@ class Contract:
+@@ -1571,6 +1967,8 @@ class Contract:
              raise PluginError(1, "plugin", "round not found")
          if rr.status != 0:
              raise PluginError(1, "plugin", "round not open")
@@ -1065,7 +1095,7 @@ index 4cac30a0..0df73e41 100644
          if len(rr.participant_addresses) >= gdomino.NUM_PLAYERS:
              raise PluginError(1, "plugin", "round already has enough players")
          if bytes(msg.player_address) in [bytes(a) for a in rr.participant_addresses]:
-@@ -1595,7 +1970,7 @@ class Contract:
+@@ -1595,7 +1993,7 @@ class Contract:
              out.error.CopyFrom(w.error)
          return out
  
@@ -1074,7 +1104,7 @@ index 4cac30a0..0df73e41 100644
          """Trustless settle: operator reveals the seed AND the full move log.
          The plugin replays both (deal derived from the seed, each move
          validated legal in sequence) to derive the winner itself -- exactly
-@@ -1603,6 +1978,7 @@ class Contract:
+@@ -1603,6 +2001,7 @@ class Contract:
          here to also validate the moves since domino's outcome depends on
          player choices, not just the seed. An illegal move anywhere in the
          claimed log rejects the whole settle -- there is no partial credit."""
@@ -1082,7 +1112,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1612,8 +1988,6 @@ class Contract:
+@@ -1612,8 +2011,6 @@ class Contract:
          rr = unmarshal(DominoRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -1091,7 +1121,7 @@ index 4cac30a0..0df73e41 100644
          if bytes(rr.operator_address) != bytes(msg.operator_address):
              raise PluginError(1, "plugin", "only the operator can settle")
          if seed_commitment(bytes(msg.seed)) != bytes(rr.commitment):
-@@ -1621,6 +1995,8 @@ class Contract:
+@@ -1621,6 +2018,8 @@ class Contract:
          if len(rr.participant_addresses) != gdomino.NUM_PLAYERS:
              raise PluginError(1, "plugin", "round never filled both seats")
  
@@ -1100,7 +1130,7 @@ index 4cac30a0..0df73e41 100644
          moves = [
              gdomino.Move(action=m.action,
                           tile=(m.tile_low, m.tile_high) if m.action == "play" else None,
-@@ -1628,7 +2004,7 @@ class Contract:
+@@ -1628,7 +2027,7 @@ class Contract:
              for m in msg.moves
          ]
          try:
@@ -1109,7 +1139,7 @@ index 4cac30a0..0df73e41 100644
          except gdomino.IllegalMove as exc:
              raise PluginError(1, "plugin", f"illegal move in claimed log: {exc}")
  
-@@ -1664,14 +2040,25 @@ class Contract:
+@@ -1664,14 +2063,25 @@ class Contract:
          if escrow.amount < total:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= total
@@ -1136,7 +1166,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 1
          rr.seed = msg.seed
          rr.winner_slots.extend(result.winners)
-@@ -1688,6 +2075,7 @@ class Contract:
+@@ -1688,6 +2098,7 @@ class Contract:
          """Refund every escrowed entry fee for a round the operator never
          settled within ROOM_EXPIRY_BLOCKS -- including a round that only ever
          got one participant (that one address is simply refunded alone)."""
@@ -1144,7 +1174,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_domino_round(msg.round_id)
-@@ -1697,10 +2085,7 @@ class Contract:
+@@ -1697,10 +2108,7 @@ class Contract:
          rr = unmarshal(DominoRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -1156,7 +1186,7 @@ index 4cac30a0..0df73e41 100644
  
          participants = [bytes(a) for a in rr.participant_addresses]
          escrow_key = key_for_account(domino_escrow_address(msg.round_id))
-@@ -1722,8 +2107,12 @@ class Contract:
+@@ -1722,8 +2130,12 @@ class Contract:
          sets = []
          total_refunded = 0
          for addr in participants:
@@ -1169,7 +1199,7 @@ index 4cac30a0..0df73e41 100644
              acct.amount += rr.entry_fee
              total_refunded += rr.entry_fee
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
-@@ -1732,6 +2121,11 @@ class Contract:
+@@ -1732,6 +2144,11 @@ class Contract:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= total_refunded
          sets.append(PluginSetOp(key=escrow_key, value=marshal(escrow)))
@@ -1181,7 +1211,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 2  # expired/refunded
          sets.append(PluginSetOp(key=round_key, value=marshal(rr)))
  
-@@ -1758,6 +2152,8 @@ class Contract:
+@@ -1758,6 +2175,8 @@ class Contract:
              raise PluginError(1, "plugin", "rake_bps must be <= 10000")
          if msg.operator_address not in ADMIN_ADDRESSES:
              raise err_unauthorized_signer()
@@ -1190,7 +1220,7 @@ index 4cac30a0..0df73e41 100644
          r = PluginCheckResponse()
          r.authorized_signers.append(msg.operator_address)
          return r
-@@ -1799,14 +2195,14 @@ class Contract:
+@@ -1799,14 +2218,14 @@ class Contract:
          return r
  
      async def _deliver_message_open_poker(self, msg, height: int = 0) -> PluginDeliverResponse:
@@ -1208,7 +1238,7 @@ index 4cac30a0..0df73e41 100644
          rr = PokerRound()
          rr.round_id = msg.round_id
          rr.operator_address = msg.operator_address
-@@ -1818,14 +2214,16 @@ class Contract:
+@@ -1818,14 +2237,16 @@ class Contract:
          rr.escrow_total = 0
          rr.status = 0
          rr.opened_height = height
@@ -1226,7 +1256,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -1852,6 +2250,8 @@ class Contract:
+@@ -1852,6 +2273,8 @@ class Contract:
              raise PluginError(1, "plugin", "round not found")
          if rr.status != 0:
              raise PluginError(1, "plugin", "round not open")
@@ -1235,7 +1265,7 @@ index 4cac30a0..0df73e41 100644
          if len(rr.participant_addresses) >= gpoker.NUM_PLAYERS:
              raise PluginError(1, "plugin", "round already has enough players")
          if bytes(msg.player_address) in [bytes(a) for a in rr.participant_addresses]:
-@@ -1876,7 +2276,7 @@ class Contract:
+@@ -1876,7 +2299,7 @@ class Contract:
              out.error.CopyFrom(w.error)
          return out
  
@@ -1244,7 +1274,7 @@ index 4cac30a0..0df73e41 100644
          """Trustless settle: operator reveals the seed AND the full betting
          action log. The plugin replays both the deal (from the seed) and
          every action (validated legal at the time it was made) to derive the
-@@ -1885,6 +2285,7 @@ class Contract:
+@@ -1885,6 +2308,7 @@ class Contract:
          Domino's even pari-mutuel split, poker's payout must account for
          chips a participant never put in (stacks_remaining, always returned
          untaxed) alongside a rake taken only from the actually-contested pot."""
@@ -1252,7 +1282,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -1894,8 +2295,6 @@ class Contract:
+@@ -1894,8 +2318,6 @@ class Contract:
          rr = unmarshal(PokerRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -1261,7 +1291,7 @@ index 4cac30a0..0df73e41 100644
          if bytes(rr.operator_address) != bytes(msg.operator_address):
              raise PluginError(1, "plugin", "only the operator can settle")
          if seed_commitment(bytes(msg.seed)) != bytes(rr.commitment):
-@@ -1903,9 +2302,11 @@ class Contract:
+@@ -1903,9 +2325,11 @@ class Contract:
          if len(rr.participant_addresses) != gpoker.NUM_PLAYERS:
              raise PluginError(1, "plugin", "round never filled both seats")
  
@@ -1274,7 +1304,7 @@ index 4cac30a0..0df73e41 100644
                                      (rr.buy_in, rr.buy_in), actions)
          except gpoker.IllegalMove as exc:
              raise PluginError(1, "plugin", f"illegal action in claimed log: {exc}")
-@@ -1946,14 +2347,25 @@ class Contract:
+@@ -1946,14 +2370,25 @@ class Contract:
          if escrow.amount < rr.escrow_total:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= rr.escrow_total
@@ -1301,7 +1331,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 1
          rr.seed = msg.seed
          rr.winner_slots.extend(result.winners)
-@@ -1971,6 +2383,7 @@ class Contract:
+@@ -1971,6 +2406,7 @@ class Contract:
          settled within ROOM_EXPIRY_BLOCKS -- including a round that only
          ever got one participant (that one address is simply refunded
          alone)."""
@@ -1309,7 +1339,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          round_key = key_for_poker_round(msg.round_id)
-@@ -1980,10 +2393,7 @@ class Contract:
+@@ -1980,10 +2416,7 @@ class Contract:
          rr = unmarshal(PokerRound, val) if val else None
          if rr is None:
              raise PluginError(1, "plugin", "round not found")
@@ -1321,7 +1351,7 @@ index 4cac30a0..0df73e41 100644
  
          participants = [bytes(a) for a in rr.participant_addresses]
          escrow_key = key_for_account(poker_escrow_address(msg.round_id))
-@@ -2005,8 +2415,12 @@ class Contract:
+@@ -2005,8 +2438,12 @@ class Contract:
          sets = []
          total_refunded = 0
          for addr in participants:
@@ -1334,7 +1364,7 @@ index 4cac30a0..0df73e41 100644
              acct.amount += rr.buy_in
              total_refunded += rr.buy_in
              sets.append(PluginSetOp(key=key_for_account(addr), value=marshal(acct)))
-@@ -2015,6 +2429,11 @@ class Contract:
+@@ -2015,6 +2452,11 @@ class Contract:
              raise PluginError(1, "plugin", "escrow underfunded")
          escrow.amount -= total_refunded
          sets.append(PluginSetOp(key=escrow_key, value=marshal(escrow)))
@@ -1346,7 +1376,7 @@ index 4cac30a0..0df73e41 100644
          rr.status = 2  # expired/refunded
          sets.append(PluginSetOp(key=round_key, value=marshal(rr)))
  
-@@ -2062,7 +2481,88 @@ class Contract:
+@@ -2062,7 +2504,88 @@ class Contract:
                  val = r.entries[0].value if r.entries else None
          return val, None
  
@@ -1435,7 +1465,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          key = key_for_account(msg.recipient_address)
-@@ -2081,6 +2581,7 @@ class Contract:
+@@ -2081,6 +2604,7 @@ class Contract:
          return out
  
      async def _deliver_buy_gems(self, msg):
@@ -1443,7 +1473,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          key = key_for_gems(msg.recipient_address)
-@@ -2100,6 +2601,7 @@ class Contract:
+@@ -2100,6 +2624,7 @@ class Contract:
          return out
  
      async def _deliver_transfer_gems(self, msg):
@@ -1451,7 +1481,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          from_key = key_for_gems(msg.from_address)
-@@ -2147,6 +2649,8 @@ class Contract:
+@@ -2147,6 +2672,8 @@ class Contract:
              raise PluginError(1, "plugin", "empty token_id")
          if not msg.kind:
              raise PluginError(1, "plugin", "empty kind")
@@ -1460,7 +1490,7 @@ index 4cac30a0..0df73e41 100644
          r = PluginCheckResponse()
          r.recipient = msg.owner_address
          r.authorized_signers.append(msg.operator_address)
-@@ -2174,6 +2678,7 @@ class Contract:
+@@ -2174,6 +2701,7 @@ class Contract:
          return r
  
      async def _deliver_mint_cosmetic(self, msg):
@@ -1468,7 +1498,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          key = key_for_cosmetic(msg.token_id)
-@@ -2194,6 +2699,7 @@ class Contract:
+@@ -2194,6 +2722,7 @@ class Contract:
          return out
  
      async def _deliver_buy_cosmetic(self, msg):
@@ -1476,7 +1506,7 @@ index 4cac30a0..0df73e41 100644
          if not self.plugin or not self.config:
              raise PluginError(1, "plugin", "plugin or config not initialized")
          # price comes from the SHARED economy catalog (must be a gem-priced item)
-@@ -2240,6 +2746,7 @@ class Contract:
+@@ -2240,6 +2769,7 @@ class Contract:
          return out
  
      async def _deliver_transfer_cosmetic(self, msg):
@@ -2523,10 +2553,10 @@ index 60ddad6d..94ccc00c 100644
      def test_unknown_round_rejected(self, contract, state):
 diff --git a/plugin/python/tests/test_fair_randomness_v2.py b/plugin/python/tests/test_fair_randomness_v2.py
 new file mode 100644
-index 00000000..9453b03b
+index 00000000..1b078688
 --- /dev/null
 +++ b/plugin/python/tests/test_fair_randomness_v2.py
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,326 @@
 +"""Fair-randomness-v2 (audit/specs/fair-randomness-v2.md, Option A) end-to-end.
 +
 +The operator commits a secret at open, betting is stopped by an explicit close
@@ -2539,6 +2569,7 @@ index 00000000..9453b03b
 +
 +import pytest
 +
++import contract.contract as contract_mod
 +from contract.contract import (
 +    Contract, ADMIN_ADDRESSES, TREASURY_ADDRESS,
 +    ENTROPY_DELAY_BLOCKS, ENTROPY_WINDOW_BLOCKS, SETTLE_GRACE_BLOCKS,
@@ -2575,22 +2606,24 @@ index 00000000..9453b03b
 +    return Contract(config=Config(), plugin=state)
 +
 +
-+def _begin_block(contract, height, block_hash):
++def _begin_block(contract, height, block_hash, vdf=b""):
 +    """Drive the real begin_block so the entropy ledger is populated exactly the
 +    way a running chain would, rather than writing ledger keys by hand."""
-+    resp = run(contract.begin_block(
-+        PluginBeginRequest(height=height, last_block_hash=block_hash)))
++    resp = run(contract.begin_block(PluginBeginRequest(
++        height=height, last_block_hash=block_hash, vdf_output=vdf)))
 +    assert not resp.HasField("error"), resp.error.msg
 +
 +
-+def _run_blocks(contract, lo, hi):
-+    """begin_block for every height in [lo, hi]; returns {predecessor_height: hash}."""
-+    hashes = {}
++def _run_blocks(contract, lo, hi, with_vdf=False):
++    """begin_block for every height in [lo, hi]; returns
++    {predecessor_height: ledger_value}."""
++    values = {}
 +    for h in range(lo, hi + 1):
 +        bh = derive_seed(b"block", h.to_bytes(8, "big"))
-+        _begin_block(contract, h, bh)
-+        hashes[h - 1] = bh
-+    return hashes
++        vdf = derive_seed(b"vdf", h.to_bytes(8, "big"))[:24] if with_vdf else b""
++        _begin_block(contract, h, bh, vdf)
++        values[h - 1] = bh + vdf
++    return values
 +
 +
 +def _open(contract, state, *, entry_fee=100, rake_bps=1000, bond=500, height=1000):
@@ -2775,6 +2808,81 @@ index 00000000..9453b03b
 +    assert state.balance(bingo_bond_address(RID)) == 0
 +    assert state.balance(TREASURY_ADDRESS) == 500  # bond slashed to the house
 +    assert state.balance(ADMIN) == 9_500           # operator is out the bond
++
++
++# -- VDF hardening (audit/specs/fair-randomness-v2.md A.2) --------------------
++
++@pytest.fixture
++def require_vdf():
++    """Flip the module gate for the duration of one test."""
++    prev = contract_mod.REQUIRE_CONSENSUS_VDF
++    contract_mod.REQUIRE_CONSENSUS_VDF = True
++    try:
++        yield
++    finally:
++        contract_mod.REQUIRE_CONSENSUS_VDF = prev
++
++
++def test_begin_block_persists_hash_and_vdf(contract, state):
++    _begin_block(contract, 50, b"h" * 32, b"v" * 24)
++    assert state.kv[key_for_consensus_entropy(49)] == b"h" * 32 + b"v" * 24
++
++
++def test_vdf_output_is_folded_into_the_entropy(contract, state):
++    _open(contract, state, height=1000)
++    _join(contract, state, PLAYER_A, 100)
++    rr = _close(contract, height=1000)
++    values = _run_blocks(contract, rr.close_height + 1, rr.entropy_end + 1, with_vdf=True)
++
++    resp = run(contract._deliver_message_settle_room(
++        MessageSettleRoom(operator_address=ADMIN, round_id=RID, seed=SECRET,
++                          pattern="line"), rr.entropy_end + 1))
++    assert not resp.HasField("error"), resp.error.msg
++
++    window = [values[h] for h in range(rr.entropy_start, rr.entropy_end + 1)]
++    with_vdf_seed = rng_v2_seed(SECRET, fold_consensus_entropy(window), RID)
++    hash_only_seed = rng_v2_seed(
++        SECRET, fold_consensus_entropy([v[:32] for v in window]), RID)
++    assert with_vdf_seed != hash_only_seed  # the VDF term actually changed the fold
++    assert state.balance(PLAYER_A) == 90    # payout is consistent with a clean settle
++
++
++def test_require_vdf_fails_closed_on_a_hash_only_window(contract, state, require_vdf):
++    _open(contract, state, height=1000)
++    _join(contract, state, PLAYER_A, 100)
++    rr = _close(contract, height=1000)
++    _run_blocks(contract, rr.close_height + 1, rr.entropy_end + 1, with_vdf=False)
++    with pytest.raises(PluginError, match="consensus VDF for height .* is not available"):
++        run(contract._deliver_message_settle_room(
++            MessageSettleRoom(operator_address=ADMIN, round_id=RID, seed=SECRET,
++                              pattern="line"), rr.entropy_end + 1))
++
++
++def test_require_vdf_settles_when_every_window_block_has_a_vdf(contract, state, require_vdf):
++    _open(contract, state, entry_fee=100, rake_bps=1000, bond=500, height=1000)
++    _join(contract, state, PLAYER_A, 100)
++    rr = _close(contract, height=1000)
++    _run_blocks(contract, rr.close_height + 1, rr.entropy_end + 1, with_vdf=True)
++    resp = run(contract._deliver_message_settle_room(
++        MessageSettleRoom(operator_address=ADMIN, round_id=RID, seed=SECRET,
++                          pattern="line"), rr.entropy_end + 1))
++    assert not resp.HasField("error"), resp.error.msg
++    assert state.balance(PLAYER_A) == 90
++
++
++def test_require_vdf_fails_closed_when_one_window_block_lacks_a_vdf(contract, state, require_vdf):
++    _open(contract, state, height=1000)
++    _join(contract, state, PLAYER_A, 100)
++    rr = _close(contract, height=1000)
++    for h in range(rr.close_height + 1, rr.entropy_end + 2):
++        bh = derive_seed(b"block", h.to_bytes(8, "big"))
++        # the block that finalizes entropy_start+2 carried no VDF
++        vdf = b"" if (h - 1) == rr.entropy_start + 2 else derive_seed(b"vdf", h.to_bytes(8, "big"))[:24]
++        _begin_block(contract, h, bh, vdf)
++    with pytest.raises(PluginError, match="consensus VDF for height"):
++        run(contract._deliver_message_settle_room(
++            MessageSettleRoom(operator_address=ADMIN, round_id=RID, seed=SECRET,
++                              pattern="line"), rr.entropy_end + 1))
 diff --git a/plugin/python/tests/test_poker_lifecycle.py b/plugin/python/tests/test_poker_lifecycle.py
 index 9073e649..93bbb562 100644
 --- a/plugin/python/tests/test_poker_lifecycle.py

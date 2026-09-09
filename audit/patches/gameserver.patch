@@ -1249,7 +1249,7 @@ index 0000000..4160f20
 +            raise AuthError("wallet authorization grant is invalid, expired, used or payload-mismatched")
 +        return operation
 diff --git a/gameserver/chain.py b/gameserver/chain.py
-index 44ddc65..d40d657 100644
+index 44ddc65..5fa1e67 100644
 --- a/gameserver/chain.py
 +++ b/gameserver/chain.py
 @@ -10,11 +10,13 @@ from __future__ import annotations
@@ -1541,15 +1541,15 @@ index 44ddc65..d40d657 100644
                                     num_cards=num_cards, amount=amount)
 -        return self.submit_and_wait(player, "join_room", m.SerializeToString())
 +        return self.submit_and_wait(player, "join_room", m.SerializeToString(), operation_id=operation_id)
- 
--    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line"):
++
 +    def close_room(self, operator: Key, round_id: bytes, operation_id: str | None = None):
 +        m = tx_pb2.MessageCloseRoom(operator_address=operator.addr_bytes, round_id=round_id)
 +        tx_hash, receipt = self.submit_and_wait_receipt(
 +            operator, "close_room", m.SerializeToString(), operation_id=operation_id,
 +        )
 +        return tx_hash, receipt["height"]
-+
+ 
+-    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line"):
 +    def settle_room(self, operator: Key, round_id: bytes, seed: bytes, pattern: str = "line",
 +                    operation_id: str | None = None):
          m = tx_pb2.MessageSettleRoom(operator_address=operator.addr_bytes, round_id=round_id,
@@ -1578,15 +1578,15 @@ index 44ddc65..d40d657 100644
                                        bet_type=bet_type, bet_number=bet_number, amount=amount)
 -        return self.submit_and_wait(player, "roulette_bet", m.SerializeToString())
 +        return self.submit_and_wait(player, "roulette_bet", m.SerializeToString(), operation_id=operation_id)
- 
--    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes):
++
 +    def close_roulette(self, operator: Key, round_id: bytes, operation_id: str | None = None):
 +        m = tx_pb2.MessageCloseRoulette(operator_address=operator.addr_bytes, round_id=round_id)
 +        tx_hash, receipt = self.submit_and_wait_receipt(
 +            operator, "close_roulette", m.SerializeToString(), operation_id=operation_id,
 +        )
 +        return tx_hash, receipt["height"]
-+
+ 
+-    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes):
 +    def settle_roulette(self, operator: Key, round_id: bytes, seed: bytes,
 +                        operation_id: str | None = None):
          m = tx_pb2.MessageSettleRoulette(operator_address=operator.addr_bytes, round_id=round_id, seed=seed)
@@ -1613,15 +1613,15 @@ index 44ddc65..d40d657 100644
          m = tx_pb2.MessageJoinDomino(player_address=player.addr_bytes, round_id=round_id, amount=amount)
 -        return self.submit_and_wait(player, "join_domino", m.SerializeToString())
 +        return self.submit_and_wait(player, "join_domino", m.SerializeToString(), operation_id=operation_id)
-+
+ 
+-    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves):
 +    def close_domino(self, operator: Key, round_id: bytes, operation_id: str | None = None):
 +        m = tx_pb2.MessageCloseDomino(operator_address=operator.addr_bytes, round_id=round_id)
 +        tx_hash, receipt = self.submit_and_wait_receipt(
 +            operator, "close_domino", m.SerializeToString(), operation_id=operation_id,
 +        )
 +        return tx_hash, receipt["height"]
- 
--    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves):
++
 +    def settle_domino(self, operator: Key, round_id: bytes, seed: bytes, moves,
 +                      operation_id: str | None = None):
          """`moves` is a list of (action, tile_low, tile_high, end) tuples --
@@ -1655,15 +1655,15 @@ index 44ddc65..d40d657 100644
          m = tx_pb2.MessageJoinPoker(player_address=player.addr_bytes, round_id=round_id, amount=amount)
 -        return self.submit_and_wait(player, "join_poker", m.SerializeToString())
 +        return self.submit_and_wait(player, "join_poker", m.SerializeToString(), operation_id=operation_id)
- 
--    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions):
++
 +    def close_poker(self, operator: Key, round_id: bytes, operation_id: str | None = None):
 +        m = tx_pb2.MessageClosePoker(operator_address=operator.addr_bytes, round_id=round_id)
 +        tx_hash, receipt = self.submit_and_wait_receipt(
 +            operator, "close_poker", m.SerializeToString(), operation_id=operation_id,
 +        )
 +        return tx_hash, receipt["height"]
-+
+ 
+-    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions):
 +    def settle_poker(self, operator: Key, round_id: bytes, seed: bytes, actions,
 +                     operation_id: str | None = None):
          """`actions` is a list of (action, amount) tuples -- kept as plain
@@ -1677,7 +1677,7 @@ index 44ddc65..d40d657 100644
  
      def expire_poker(self, caller: Key, round_id: bytes):
          m = tx_pb2.MessageExpirePoker(caller_address=caller.addr_bytes, round_id=round_id)
-@@ -246,6 +448,30 @@ class CanopyBridge:
+@@ -246,6 +448,53 @@ class CanopyBridge:
      def height(self) -> int:
          return int(json.loads(self._post(f"{self.query_url}/v1/query/height", {}))["height"])
  
@@ -1691,12 +1691,14 @@ index 44ddc65..d40d657 100644
 +            time.sleep(poll)
 +        raise TimeoutError(f"chain did not reach height {target_height} in {timeout}s")
 +
-+    def block_hash(self, height: int) -> bytes:
++    def _block_header(self, height: int) -> dict:
 +        response = json.loads(self._post(
 +            f"{self.query_url}/v1/query/block-by-height", {"height": height},
 +        ))
-+        header = response.get("blockHeader") or response.get("result", {}).get("blockHeader") or {}
-+        value = str(header.get("hash", "")).removeprefix("0x")
++        return response.get("blockHeader") or response.get("result", {}).get("blockHeader") or {}
++
++    def block_hash(self, height: int) -> bytes:
++        value = str(self._block_header(height).get("hash", "")).removeprefix("0x")
 +        try:
 +            block_hash = bytes.fromhex(value)
 +        except ValueError as exc:
@@ -1705,10 +1707,31 @@ index 44ddc65..d40d657 100644
 +            raise ReceiptInvalid(f"block {height} returned an invalid hash")
 +        return block_hash
 +
++    def consensus_entropy_value(self, height: int) -> bytes:
++        """The plugin's entropy-ledger value for `height`: its 32-byte block
++        hash followed by that block's consensus VDF output (empty when the
++        block carried no VDF). Must equal contract.encode_consensus_entropy
++        byte for byte -- both the FSM and this path take the raw
++        BlockHeader.Vdf.Output bytes, and Canopy's RPC hex-encodes them."""
++        header = self._block_header(height)
++        h = str(header.get("hash", "")).removeprefix("0x")
++        try:
++            block_hash = bytes.fromhex(h)
++        except ValueError as exc:
++            raise ReceiptInvalid(f"block {height} returned an invalid hash") from exc
++        if len(block_hash) != 32:
++            raise ReceiptInvalid(f"block {height} returned an invalid hash")
++        vdf = (header.get("vdf") or {}).get("output") or ""
++        try:
++            vdf_bytes = bytes.fromhex(str(vdf).removeprefix("0x")) if vdf else b""
++        except ValueError as exc:
++            raise ReceiptInvalid(f"block {height} returned an invalid VDF output") from exc
++        return block_hash + vdf_bytes
++
      def account_balance(self, address: str) -> int:
          d = json.loads(self._post(f"{self.query_url}/v1/query/account", {"address": address}))
          return int(d.get("amount", 0))
-@@ -260,15 +486,74 @@ class CanopyBridge:
+@@ -260,15 +509,74 @@ class CanopyBridge:
              return None
  
      def wait_inclusion(self, sender_addr: str, tx_hash: str, timeout=150.0) -> bool:
@@ -2811,10 +2834,10 @@ index 2895d4e..007eaaa 100644
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/fairness.py b/gameserver/fairness.py
 new file mode 100644
-index 0000000..83aec0d
+index 0000000..0dc867a
 --- /dev/null
 +++ b/gameserver/fairness.py
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,81 @@
 +"""Shared game-server side of the fair-randomness-v2 close lifecycle.
 +
 +The plugin remains authoritative: it consumes its FSM-fed entropy ledger and
@@ -2826,6 +2849,7 @@ index 0000000..83aec0d
 +from __future__ import annotations
 +
 +import hashlib
++import os
 +
 +from engine.rng import derive_seed
 +
@@ -2834,6 +2858,14 @@ index 0000000..83aec0d
 +ENTROPY_WINDOW_BLOCKS = 8
 +RNG_V2_ENTROPY_DOMAIN = b"CANASINO-RNG-V2-ENTROPY"
 +RNG_V2_SEED_DOMAIN = b"CANASINO-RNG-V2"
++
++# Must match the plugin's CANASINO_REQUIRE_CONSENSUS_VDF gate: when set, a round
++# is only derived/settled once every block in its window carried a consensus VDF
++# output, so the game-server never asks the plugin to settle a window the plugin
++# will reject. Off by default (the valueless testnet's sub-second phases still
++# produce VDFs, but production is where this is enforced).
++REQUIRE_CONSENSUS_VDF = os.environ.get(
++    "CANASINO_REQUIRE_CONSENSUS_VDF", "").strip().lower() in ("1", "true", "yes")
 +# The default Canopy schedule is about 20 seconds per block. A close at H must
 +# wait through H+16, so 150 seconds can never cover a healthy production node.
 +DEFAULT_ENTROPY_WAIT_TIMEOUT = 900.0
@@ -2849,8 +2881,10 @@ index 0000000..83aec0d
 +    """Reconstruct the exact seed the plugin replays the outcome from.
 +
 +    This MUST match the plugin byte for byte (contract/contract.py):
-+      * fold  = SHA256(RNG_V2_ENTROPY_DOMAIN || h[start] || ... || h[end])
-+                -- raw concatenation, every h is a 32-byte finalized block hash;
++      * per height, the ledger value is `block_hash || vdf_output` (the VDF
++        empty when that block carried none) -- `bridge.consensus_entropy_value`;
++      * fold  = SHA256(RNG_V2_ENTROPY_DOMAIN || v[start] || ... || v[end])
++                -- raw concatenation of those ledger values;
 +      * seed  = derive_seed(RNG_V2_SEED_DOMAIN, operator_secret, fold, round_id)
 +                -- derive_seed() length-prefixes every part with a 4-byte
 +                big-endian length, so a raw concatenation here would diverge
@@ -2861,7 +2895,13 @@ index 0000000..83aec0d
 +    entropy_hash = hashlib.sha256()
 +    entropy_hash.update(RNG_V2_ENTROPY_DOMAIN)
 +    for height in range(entropy_start, entropy_end + 1):
-+        entropy_hash.update(bridge.block_hash(height))
++        value = bridge.consensus_entropy_value(height)
++        if REQUIRE_CONSENSUS_VDF and len(value) <= 32:
++            raise ValueError(
++                f"block {height} carried no consensus VDF output "
++                "(CANASINO_REQUIRE_CONSENSUS_VDF)"
++            )
++        entropy_hash.update(value)
 +    return derive_seed(
 +        RNG_V2_SEED_DOMAIN, operator_secret, entropy_hash.digest(), round_id,
 +    )
@@ -4224,7 +4264,7 @@ index 0000000..6d2eab3
 +printf 'RUNTIME_VERIFIED container=%s image=%s revision=%s\n' \
 +    "$container" "$image_id" "$image_revision"
 diff --git a/tests/fakes.py b/tests/fakes.py
-index 167e85e..628abeb 100644
+index 167e85e..e62cef7 100644
 --- a/tests/fakes.py
 +++ b/tests/fakes.py
 @@ -1,6 +1,8 @@
@@ -4236,16 +4276,17 @@ index 167e85e..628abeb 100644
  from gameserver.chain import Key
  
  
-@@ -14,6 +16,8 @@ class FakeBridge:
+@@ -14,6 +16,9 @@ class FakeBridge:
          self.network_id = 1
          self.query_url = "http://fake"
          self._key_counter = 0
 +        self.calls = []
 +        self.wait_targets = []
++        self.vdf_missing_heights = set()
  
      def new_key(self, nickname=""):
          self._key_counter += 1
-@@ -22,59 +26,87 @@ class FakeBridge:
+@@ -22,59 +27,87 @@ class FakeBridge:
          # callers like cards_for() do bytes.fromhex(addr).
          return Key(address=f"{n:040x}", public_key=f"{n:096x}", private_key=f"{n:064x}")
  
@@ -4346,7 +4387,7 @@ index 167e85e..628abeb 100644
      def expire_poker(self, caller, round_id):
          return "0xexpirepoker"
  
-@@ -85,5 +117,13 @@ class FakeBridge:
+@@ -85,5 +118,21 @@ class FakeBridge:
          self._height += 1
          return self._height
  
@@ -4357,6 +4398,14 @@ index 167e85e..628abeb 100644
 +
 +    def block_hash(self, height):
 +        return hashlib.sha256(b"fake-block" + int(height).to_bytes(8, "big")).digest()
++
++    def consensus_entropy_value(self, height):
++        value = self.block_hash(height)
++        # tests populate self.vdf_missing_heights to exercise the
++        # CANASINO_REQUIRE_CONSENSUS_VDF fail-closed path
++        if int(height) not in getattr(self, "vdf_missing_heights", ()):
++            value += hashlib.sha256(b"fake-vdf" + int(height).to_bytes(8, "big")).digest()
++        return value
 +
      def gems(self, address):
          return 0
@@ -4804,21 +4853,23 @@ index 0000000..0bd3301
 +    unittest.main()
 diff --git a/tests/test_fair_randomness_v2.py b/tests/test_fair_randomness_v2.py
 new file mode 100644
-index 0000000..b6ca36c
+index 0000000..e011beb
 --- /dev/null
 +++ b/tests/test_fair_randomness_v2.py
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,195 @@
 +"""A.6.7 regression tests for the game-server close/entropy lifecycle."""
 +
 +import hashlib
 +import os
 +import tempfile
 +import unittest
++import unittest.mock
 +
 +from engine import roulette as eroulette
 +from gameserver.chain import Key
 +from gameserver.db import Store
 +from gameserver.domino_rooms import DominoManager
++import gameserver.fairness as fairness
 +from gameserver.fairness import (
 +    ENTROPY_DELAY_BLOCKS,
 +    ENTROPY_WINDOW_BLOCKS,
@@ -4833,15 +4884,16 @@ index 0000000..b6ca36c
 +from .fakes import FakeBridge
 +
 +
-+def _plugin_reference_seed(block_hashes, operator_secret, round_id):
++def _plugin_reference_seed(ledger_values, operator_secret, round_id):
 +    """A second, independent implementation of the plugin's replay-seed layout
 +    (contract/contract.py: fold_consensus_entropy + rng_v2_seed + derive_seed).
-+    If derive_final_seed ever drifts from this, the game-server predicts a
++    `ledger_values` are the per-height `hash || vdf_output` entries. If
++    derive_final_seed ever drifts from this, the game-server predicts a
 +    different winner than the plugin pays -- the exact A.6.6 E2E flake."""
 +    fold = hashlib.sha256()
 +    fold.update(RNG_V2_ENTROPY_DOMAIN)
-+    for h in block_hashes:
-+        fold.update(h)
++    for v in ledger_values:
++        fold.update(v)
 +    entropy = fold.digest()
 +
 +    seed = hashlib.sha256()
@@ -4944,7 +4996,8 @@ index 0000000..b6ca36c
 +        operator_secret = bytes(range(32))
 +        round_id = bytes.fromhex("0011223344556677")
 +        start, end = 120, 127
-+        window = [bridge.block_hash(h) for h in range(start, end + 1)]
++        window = [bridge.consensus_entropy_value(h) for h in range(start, end + 1)]
++        self.assertTrue(all(len(v) > 32 for v in window))  # every fake block has a VDF
 +
 +        got = derive_final_seed(bridge, operator_secret, round_id, start, end)
 +        self.assertEqual(got, _plugin_reference_seed(window, operator_secret, round_id))
@@ -4955,19 +5008,32 @@ index 0000000..b6ca36c
 +            + round_id
 +        ).digest()
 +        self.assertNotEqual(got, raw)
++        # folding hash-only (dropping the VDF term) must also change the seed
++        self.assertNotEqual(
++            got, _plugin_reference_seed([v[:32] for v in window], operator_secret, round_id))
++
++    def test_require_vdf_rejects_a_window_missing_a_vdf(self):
++        bridge = FakeBridge()
++        bridge.vdf_missing_heights = {123}
++        with unittest.mock.patch.object(fairness, "REQUIRE_CONSENSUS_VDF", True):
++            with self.assertRaisesRegex(ValueError, "no consensus VDF"):
++                derive_final_seed(bridge, b"\x00" * 32, b"\x00" * 8, 120, 127)
++        # without the gate the same window derives fine (folds hash-only for 123)
++        self.assertTrue(derive_final_seed(bridge, b"\x00" * 32, b"\x00" * 8, 120, 127))
 +
 +    def test_derive_final_seed_frozen_known_answer(self):
-+        """Pins the exact bytes (FakeBridge block hashes, all-zero secret,
-+        round_id cafebabecafebabe, window 100..107) so the game-server and the
-+        plugin cannot silently drift together. If the protocol changes on
-+        purpose, update this vector and the plugin's replay layout in lockstep."""
++        """Pins the exact bytes (FakeBridge hash||vdf ledger values, all-zero
++        secret, round_id cafebabecafebabe, window 100..107) so the game-server
++        and the plugin cannot silently drift together. If the protocol changes
++        on purpose, update this vector and the plugin's replay layout in
++        lockstep."""
 +        bridge = FakeBridge()
 +        seed = derive_final_seed(
 +            bridge, b"\x00" * 32, bytes.fromhex("cafebabecafebabe"), 100, 107,
 +        )
 +        self.assertEqual(
 +            seed.hex(),
-+            "12f4931d3de1074b0293a7f94c915fa193edfc11a907e4b9f129f9f51ba313a9",
++            "6751060acdbb7ec87c459d3b119af4b77bb5f753c05bfad2656427a7165ee179",
 +        )
 +
 +    def test_generated_proto_contains_all_close_messages_and_bonds(self):
