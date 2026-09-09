@@ -1124,9 +1124,18 @@ function DominoRoom({ account, onConnect }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await registerDominoJoin(rid, account.address, signed?.txHash)
-      const hand = await getDominoHand(rid, account.address)
-      setMyHand(hand.hand)
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      try {
+        await registerDominoJoin(rid, account.address, signed?.txHash)
+      } catch (regErr) {
+        if (regErr?.status !== 425) throw regErr
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        await registerDominoJoin(rid, account.address, signed?.txHash)
+      }
+      for (let attempt = 0; attempt < 40; attempt++) {
+        try { const hand = await getDominoHand(rid, account.address); setMyHand(hand.hand); break }
+        catch (hErr) { if (hErr?.status !== 425) throw hErr; await new Promise((r) => setTimeout(r, 3000)) }
+      }
       setPhase('confirmed')
       return true
     } catch (err) {
@@ -1422,9 +1431,18 @@ function PokerRoom({ account, onConnect }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await registerPokerJoin(rid, account.address, signed?.txHash)
-      const hole = await getPokerHand(rid, account.address)
-      setMyHole(hole.hole)
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      try {
+        await registerPokerJoin(rid, account.address, signed?.txHash)
+      } catch (regErr) {
+        if (regErr?.status !== 425) throw regErr
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        await registerPokerJoin(rid, account.address, signed?.txHash)
+      }
+      for (let attempt = 0; attempt < 40; attempt++) {
+        try { const hole = await getPokerHand(rid, account.address); setMyHole(hole.hole); break }
+        catch (hErr) { if (hErr?.status !== 425) throw hErr; await new Promise((r) => setTimeout(r, 3000)) }
+      }
       setPhase('confirmed')
       return true
     } catch (err) {
