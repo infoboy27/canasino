@@ -633,7 +633,16 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       setTxHash(hash)
       setPhase('submitted')
 
-      await registerRound(round.roundId, account.address, numCards, hash)
+      // The join tx needs a block to be indexed and reach finality before the
+      // server can verify it; give it a moment, then retry once on 425.
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      try {
+        await registerRound(round.roundId, account.address, numCards, hash)
+      } catch (registerErr) {
+        if (registerErr?.status !== 425) throw registerErr
+        await new Promise((resolve) => setTimeout(resolve, 5000))
+        await registerRound(round.roundId, account.address, numCards, hash)
+      }
       const cardResponse = await getCard(round.roundId, account.address, numCards)
       setCards(cardResponse.cards || [])
       setPhase('confirmed')
