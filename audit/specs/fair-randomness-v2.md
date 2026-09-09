@@ -29,6 +29,16 @@ current plugin deliver request exposes height but not a verifiable historical
 block hash or randomness value. Supplying a hash in the operator's settlement
 message would remain operator-controlled and is explicitly forbidden.
 
+Repository inspection confirms Canopy computes the prior block hash and tracks
+VDF iterations in its consensus header, but the current `PluginBeginRequest`
+wire message contains only `height`. The compatible upstream change should add
+the finalized previous-block hash (and, if selected as protocol entropy, the
+verified VDF output/iteration commitment) as new protobuf fields. A round-close
+transaction must then fix a future entropy height; settlement may consume only
+the value delivered by the FSM for that exact height. The casino plugin must
+never query an unauthenticated HTTP endpoint or accept this value in an
+operator-signed settlement payload.
+
 The alternative is participant commit/reveal recorded on-chain, with a defined
 deadline and penalty for every missing reveal. This requires new transaction
 messages and round state in the plugin schema.

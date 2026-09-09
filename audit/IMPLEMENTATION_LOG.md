@@ -6,7 +6,7 @@ Safety rule: production remains paused; all chain tests use valueless tokens and
 ## Baseline
 
 - Frontend audit: `2eb59a3`; evidence/report: `8f7b4e2`.
-- Game-server candidate: `audit/production-hardening` at `2282731`, based on production `e842785`.
+- Game-server candidate: `audit/production-hardening` at `4029168`, based on production `e842785`.
 - Canopy plugin candidate: `audit/canasino-financial-hardening` at `ee3b4e6e`, based on production `cd4cd495`.
 - FleetWallet candidate: `audit/canasino-message-auth` at `86102d3`, based on `86fb179`.
 - Baseline gates: frontend 6 unit + 9 E2E; game-server 203; plugin 177; all passing.
@@ -16,7 +16,7 @@ Safety rule: production remains paused; all chain tests use valueless tokens and
 | # | Workstream | Status | Definition of done |
 |---:|---|---|---|
 | 1 | Wallet-bound authorization | IMPLEMENTED; E2E PENDING | Backend/frontend/FleetWallet protocol and cross-language proof pass; interactive extension E2E remains |
-| 2 | Durable transaction reconciliation | PARTIAL | Persist-before-submit outbox, successful receipt/finality, restart-safe idempotency |
+| 2 | Durable transaction reconciliation | IMPLEMENTED | Persist-before-submit outbox, exact receipt/finality, restart-safe transaction and multi-step join idempotency |
 | 3 | Fair close/reveal randomness | SPECIFIED; BLOCKING | Bets close before unpredictable entropy; deterministic settle; abort-safe refund/penalty |
 | 4 | Signed Poker/Domino actions | IMPLEMENTED; E2E PENDING | Every ordered action bound to player, round, turn and prior state |
 | 5 | Solvency/accounting invariants | IMPLEMENTED; STRESS PENDING | Worst-case liabilities reserved; conservation and bounds proven under concurrency |
@@ -46,3 +46,5 @@ Safety rule: production remains paused; all chain tests use valueless tokens and
 - 2026-09-08: added backend chain-write kill switch (off by default for a real RPC), capability/Prometheus gauges, immutable build metadata, checksummed SQLite backup verification and removal of automatic production Git commits/pushes. Game-server suite passed 232/232 in an isolated container.
 - 2026-09-08: launched a separate clean Canopy node using image digest `sha256:2340361...`, internal Docker network and isolated `/tmp/canasino-valueless-audit-20260908` data. It produced blocks with a new validator and Python plugin query returned HTTP 200. No host ports or production mounts were used; no transactions were submitted.
 - 2026-09-08: frontend passed ESLint, TypeScript, 11/11 unit tests and production build. All changes remain local candidates; production is still paused and unchanged.
+- 2026-09-08: fault injection now covers the business-level `fund -> join/bet` boundary. A durable custodial-join saga stores the generated key and exact payload before funding, resumes the same outbox operations after a lost accepted response, and applies local membership once. Bingo, Roulette, Domino and Poker each proved one fund and one join after restart; full game-server suite passed 233/233 with no network.
+- 2026-09-08: inspected the Canopy consensus/plugin boundary for fair randomness. Canopy commits block hashes and VDF data, but `PluginBeginRequest` currently exposes only `height`; the plugin cannot authenticate a historical hash supplied by the operator. Workstream 3 therefore remains blocking pending an upstream-compatible FSM-to-plugin entropy field plus close-height/bond lifecycle tests.

@@ -13,13 +13,13 @@ index b4342af..44a9c74 100644
          run: python -m unittest discover -s tests -t . -v
 diff --git a/Dockerfile.audit b/Dockerfile.audit
 new file mode 100644
-index 0000000..fadaf0e
+index 0000000..e7b7b2e
 --- /dev/null
 +++ b/Dockerfile.audit
 @@ -0,0 +1,6 @@
 +ARG GAMESERVER_IMAGE=canasino-gameserver:latest
 +FROM ${GAMESERVER_IMAGE}
-+RUN pip install --no-cache-dir httpx==0.28.1 pytest==9.1.1 structlog==26.1.0
++RUN pip install --no-cache-dir httpx2==2.12.0 pytest==9.1.1 structlog==26.1.0
 +COPY tests/ ./tests/
 +ENV PYTHONDONTWRITEBYTECODE=1
 +CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-q"]
@@ -1554,7 +1554,7 @@ index 44ddc65..fea4009 100644
 +                raise ReceiptInvalid(f"transaction field mismatch: {field}")
 +        return {**result, "confirmations": confirmations}
 diff --git a/gameserver/db.py b/gameserver/db.py
-index 95a5723..fe91c84 100644
+index 95a5723..5746dc5 100644
 --- a/gameserver/db.py
 +++ b/gameserver/db.py
 @@ -17,6 +17,8 @@ import json
@@ -1566,7 +1566,7 @@ index 95a5723..fe91c84 100644
  from typing import Dict, List, Optional
  
  DB_PATH = os.environ.get("CASINO_DB_PATH", "/app/data/canasino.db")
-@@ -121,21 +123,292 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
+@@ -121,21 +123,368 @@ CREATE TABLE IF NOT EXISTS poker_open_rounds (
      actions TEXT NOT NULL DEFAULT '[]',
      created_at INTEGER
  );
@@ -1617,6 +1617,17 @@ index 95a5723..fe91c84 100644
 +    created_at INTEGER NOT NULL,
 +    updated_at INTEGER NOT NULL
 +);
++CREATE TABLE IF NOT EXISTS custodial_joins (
++    game TEXT NOT NULL,
++    round_id TEXT NOT NULL,
++    address TEXT NOT NULL,
++    key_json TEXT NOT NULL,
++    payload_json TEXT NOT NULL,
++    state TEXT NOT NULL,
++    created_at INTEGER NOT NULL,
++    updated_at INTEGER NOT NULL,
++    PRIMARY KEY (game, round_id, address)
++);
 +CREATE INDEX IF NOT EXISTS rounds_settled_at ON rounds(settled_at);
 +CREATE INDEX IF NOT EXISTS roulette_settled_at ON roulette_rounds(settled_at);
 +CREATE INDEX IF NOT EXISTS domino_settled_at ON domino_rounds(settled_at);
@@ -1626,6 +1637,7 @@ index 95a5723..fe91c84 100644
 +CREATE INDEX IF NOT EXISTS wallet_grants_expiry ON wallet_grants(expires_at);
 +CREATE INDEX IF NOT EXISTS operations_state_time ON operations(state, updated_at);
 +CREATE INDEX IF NOT EXISTS chain_outbox_state_time ON chain_outbox(state, updated_at);
++CREATE INDEX IF NOT EXISTS custodial_joins_state_time ON custodial_joins(state, updated_at);
  """
  
  _PERIOD_SECONDS = {"daily": 86_400, "weekly": 7 * 86_400, "monthly": 30 * 86_400}
@@ -1858,10 +1870,74 @@ index 95a5723..fe91c84 100644
 +        ).fetchall()
 +        return [self.get_chain_submission(row[0]) for row in rows]
 +
++    # -- crash-safe multi-step custodial joins -----------------------------
++
++    def prepare_custodial_join(self, game: str, round_id: str, address: str,
++                               key: dict, payload: dict, now: int) -> dict:
++        """Persist the player key and exact join intent before minting funds.
++
++        The chain outbox makes each individual transaction idempotent.  This
++        saga record connects the fund and join transactions so a restart in
++        between can finish the same operation with the same player key.
++        """
++        existing = self.get_custodial_join(game, round_id, address)
++        key_json = json.dumps(key, sort_keys=True, separators=(",", ":"))
++        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
++        if existing:
++            if existing["key_json"] != key_json or existing["payload_json"] != payload_json:
++                raise ValueError("custodial join already belongs to different content")
++            return existing
++        self._conn.execute(
++            "INSERT INTO custodial_joins "
++            "(game,round_id,address,key_json,payload_json,state,created_at,updated_at) "
++            "VALUES (?,?,?,?,?,'PREPARED',?,?)",
++            (game, round_id, address, key_json, payload_json, now, now),
++        )
++        return self.get_custodial_join(game, round_id, address)
++
++    def get_custodial_join(self, game: str, round_id: str, address: str) -> Optional[dict]:
++        row = self._conn.execute(
++            "SELECT game,round_id,address,key_json,payload_json,state,created_at,updated_at "
++            "FROM custodial_joins WHERE game=? AND round_id=? AND address=?",
++            (game, round_id, address),
++        ).fetchone()
++        if not row:
++            return None
++        fields = ("game", "round_id", "address", "key_json", "payload_json",
++                  "state", "created_at", "updated_at")
++        return dict(zip(fields, row))
++
++    def mark_custodial_join(self, game: str, round_id: str, address: str,
++                            state: str, now: int) -> None:
++        if state not in ("FUNDED", "JOINED", "APPLIED"):
++            raise ValueError("invalid custodial join state")
++        result = self._conn.execute(
++            "UPDATE custodial_joins SET state=?,updated_at=? "
++            "WHERE game=? AND round_id=? AND address=?",
++            (state, now, game, round_id, address),
++        )
++        if result.rowcount != 1:
++            raise ValueError("custodial join does not exist")
++
++    def pending_custodial_joins(self, game: Optional[str] = None,
++                                limit: int = 100) -> List[dict]:
++        if game is None:
++            rows = self._conn.execute(
++                "SELECT game,round_id,address FROM custodial_joins "
++                "WHERE state!='APPLIED' ORDER BY updated_at LIMIT ?", (limit,),
++            ).fetchall()
++        else:
++            rows = self._conn.execute(
++                "SELECT game,round_id,address FROM custodial_joins "
++                "WHERE game=? AND state!='APPLIED' ORDER BY updated_at LIMIT ?",
++                (game, limit),
++            ).fetchall()
++        return [self.get_custodial_join(*row) for row in rows]
++
      # -- round history / stats (written once, at settle) ---------------------
  
      def record_settle(self, round_id_hex: str, room: str, entry_fee: int, rake_bps: int,
-@@ -146,20 +419,15 @@ class Store:
+@@ -146,20 +495,15 @@ class Store:
          Idempotent: a retried/duplicate settle call for the same round_id_hex
          (e.g. a client reconnect replaying the WS flow after a restart) must
          not double-count player_stats — the chain only ever pays out once."""
@@ -1885,7 +1961,7 @@ index 95a5723..fe91c84 100644
              return
  
          winner_set = set(winners)
-@@ -217,12 +485,19 @@ class Store:
+@@ -217,12 +561,19 @@ class Store:
                      for a, g, w, t in cur.fetchall()]
          since = int(time.time()) - window
          cur = self._conn.execute(
@@ -1908,7 +1984,7 @@ index 95a5723..fe91c84 100644
                  s = agg.setdefault(addr, {"address": addr, "gamesPlayed": 0, "wins": 0, "totalWon": 0})
                  s["gamesPlayed"] += 1
                  s["wins"] += 1 if addr in winners else 0
-@@ -296,19 +571,14 @@ class Store:
+@@ -296,19 +647,14 @@ class Store:
          for the same round_id_hex must not double-count player_stats. Shares
          the player_stats table with Bingo — a player's win rate/total won is
          tracked across every game, not siloed per game."""
@@ -1931,7 +2007,7 @@ index 95a5723..fe91c84 100644
              return
  
          for addr, delta in payouts.items():
-@@ -384,20 +654,15 @@ class Store:
+@@ -384,20 +730,15 @@ class Store:
                                tx_hash: str) -> None:
          """Same idempotency guarantee as record_settle/record_roulette_settle.
          Shares player_stats with every other game."""
@@ -1955,7 +2031,7 @@ index 95a5723..fe91c84 100644
              return
  
          winner_set = set(winners)
-@@ -487,21 +752,16 @@ class Store:
+@@ -487,21 +828,16 @@ class Store:
                               tx_hash: str) -> None:
          """Same idempotency guarantee as record_settle/record_domino_settle.
          Shares player_stats with every other game."""
@@ -1981,10 +2057,10 @@ index 95a5723..fe91c84 100644
  
          winner_set = set(winners)
 diff --git a/gameserver/domino_rooms.py b/gameserver/domino_rooms.py
-index 2895d4e..7319bb3 100644
+index 2895d4e..0da876e 100644
 --- a/gameserver/domino_rooms.py
 +++ b/gameserver/domino_rooms.py
-@@ -6,15 +6,18 @@ open round in memory (rebuilt from the persisted move log on restart) so
+@@ -6,15 +6,20 @@ open round in memory (rebuilt from the persisted move log on restart) so
  each move is validated the instant it's submitted, long before the round
  ever touches the chain.
  
@@ -2002,20 +2078,24 @@ index 2895d4e..7319bb3 100644
  
 +import hashlib
 +import json
++import logging
  import secrets
++import time
 +from threading import RLock
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional, Tuple
  
-@@ -23,6 +26,7 @@ from engine.rng import commitment
+@@ -23,6 +28,9 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
 +from .synchronization import synchronized, settled_once
++
++logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -73,6 +77,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -73,6 +81,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
  
  class DominoManager:
      def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
@@ -2024,7 +2104,61 @@ index 2895d4e..7319bb3 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -109,17 +115,20 @@ class DominoManager:
+@@ -80,6 +90,7 @@ class DominoManager:
+         self.engines: Dict[str, edomino.GameEngine] = {}
+         if self.store is not None:
+             self._reconcile_open_rounds()
++            self._reconcile_custodial_joins()
+ 
+     def _reconcile_open_rounds(self) -> None:
+         for row in self.store.load_open_domino_rounds():
+@@ -100,6 +111,45 @@ class DominoManager:
+             if len(participants) == edomino.NUM_PLAYERS:
+                 self._rebuild_engine(rnd)
+ 
++    def _resume_custodial_join(self, row: dict) -> str:
++        rnd = self.rounds.get(row["round_id"])
++        if rnd is None or rnd.status != "open":
++            raise ValueError("custodial domino join round is not open")
++        address = row["address"]
++        key = Key(**json.loads(row["key_json"]))
++        if address in rnd.participants:
++            self.store.mark_custodial_join("domino", rnd.id_hex, address, "APPLIED", int(time.time()))
++            return address
++        if len(rnd.participants) >= edomino.NUM_PLAYERS:
++            raise ValueError("round already has enough players")
++        self.bridge.buy_coins(
++            self.operator, address, rnd.entry_fee,
++            operation_id=f"domino:fund:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("domino", rnd.id_hex, address, "FUNDED", int(time.time()))
++        self.bridge.join_domino(
++            key, rnd.round_id, rnd.entry_fee,
++            operation_id=f"domino:join:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("domino", rnd.id_hex, address, "JOINED", int(time.time()))
++        rnd.participants[address] = Participant(key)
++        self._persist_participants(rnd)
++        if len(rnd.participants) == edomino.NUM_PLAYERS:
++            self._rebuild_engine(rnd)
++        self.store.mark_custodial_join("domino", rnd.id_hex, address, "APPLIED", int(time.time()))
++        return address
++
++    def _reconcile_custodial_joins(self, round_id_hex: str | None = None) -> Optional[str]:
++        recovered = None
++        for row in self.store.pending_custodial_joins("domino"):
++            if round_id_hex is not None and row["round_id"] != round_id_hex:
++                continue
++            try:
++                recovered = self._resume_custodial_join(row)
++            except Exception as exc:
++                logger.warning("domino custodial join remains pending: %s", exc)
++        return recovered
++
+     def _rebuild_engine(self, rnd: DominoRound) -> edomino.GameEngine:
+         engine = edomino.GameEngine(rnd.seed)
+         for m in rnd.moves:
+@@ -109,34 +159,58 @@ class DominoManager:
              rnd.result = engine.result
          return engine
  
@@ -2046,12 +2180,26 @@ index 2895d4e..7319bb3 100644
      def join(self, round_id_hex: str, nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
-@@ -127,16 +136,23 @@ class DominoManager:
+             raise ValueError("round not open")
++        if self.store is not None:
++            recovered = self._reconcile_custodial_joins(round_id_hex)
++            if recovered is not None:
++                return recovered
          if len(rnd.participants) >= edomino.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          key = self.bridge.new_key(nickname or f"dplayer_{secrets.token_hex(3)}")
 -        self.bridge.buy_coins(self.operator, key.address, rnd.entry_fee)
 -        self.bridge.join_domino(key, rnd.round_id, rnd.entry_fee)
++        if self.store is not None:
++            self.store.prepare_custodial_join(
++                "domino", rnd.id_hex, key.address,
++                {"address": key.address, "public_key": key.public_key, "private_key": key.private_key},
++                {"amount": rnd.entry_fee}, int(time.time()),
++            )
++            return self._resume_custodial_join(
++                self.store.get_custodial_join("domino", rnd.id_hex, key.address)
++            )
++        # In-memory development path has no restart guarantee.
 +        self.bridge.buy_coins(self.operator, key.address, rnd.entry_fee,
 +                              operation_id=f"domino:fund:{rnd.id_hex}:{key.address}")
 +        self.bridge.join_domino(key, rnd.round_id, rnd.entry_fee,
@@ -2072,7 +2220,7 @@ index 2895d4e..7319bb3 100644
          if len(rnd.participants) >= edomino.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -153,8 +169,33 @@ class DominoManager:
+@@ -153,8 +227,33 @@ class DominoManager:
      def player_index(self, rnd: DominoRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
@@ -2107,7 +2255,7 @@ index 2895d4e..7319bb3 100644
          """Validates and applies one move. Raises engine.domino.IllegalMove on
          an illegal move, or ValueError if the round/turn state doesn't allow
          one at all. Returns a GameResult once this move ends the game, else
-@@ -165,6 +206,10 @@ class DominoManager:
+@@ -165,6 +264,10 @@ class DominoManager:
          engine = self.engines.get(round_id_hex)
          if engine is None:
              raise ValueError("round does not have both players yet")
@@ -2118,7 +2266,7 @@ index 2895d4e..7319bb3 100644
          idx = self.player_index(rnd, address)
          if engine.turn != idx:
              raise ValueError("not this address's turn")
-@@ -192,6 +237,7 @@ class DominoManager:
+@@ -192,6 +295,7 @@ class DominoManager:
          return sum(rnd.entry_fee for rnd in self.rounds.values()
                     if rnd.status == "open" and addr in rnd.participants)
  
@@ -2126,7 +2274,7 @@ index 2895d4e..7319bb3 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          engine = self.engines[round_id_hex]
-@@ -201,7 +247,10 @@ class DominoManager:
+@@ -201,7 +305,10 @@ class DominoManager:
          before = {a: self.bridge.account_balance(a) for a in order}
          proto_moves = [(m["action"], (m["tile"] or [0, 0])[0], (m["tile"] or [0, 0])[1], m.get("end") or "")
                         for m in rnd.moves]
@@ -2139,10 +2287,10 @@ index 2895d4e..7319bb3 100644
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/poker_rooms.py b/gameserver/poker_rooms.py
-index 4014299..b771919 100644
+index 4014299..c18a226 100644
 --- a/gameserver/poker_rooms.py
 +++ b/gameserver/poker_rooms.py
-@@ -6,16 +6,18 @@ memory (rebuilt from the persisted action log on restart) so each action
+@@ -6,16 +6,20 @@ memory (rebuilt from the persisted action log on restart) so each action
  is validated the instant it's submitted, long before the round ever
  touches the chain.
  
@@ -2161,20 +2309,24 @@ index 4014299..b771919 100644
  
 +import hashlib
 +import json
++import logging
  import secrets
++import time
 +from threading import RLock
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
  
-@@ -24,6 +26,7 @@ from engine.rng import commitment
+@@ -24,6 +28,9 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
 +from .synchronization import synchronized, settled_once
++
++logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -75,6 +78,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -75,6 +82,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
  
  class PokerManager:
      def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
@@ -2183,7 +2335,61 @@ index 4014299..b771919 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -113,11 +118,15 @@ class PokerManager:
+@@ -82,6 +91,7 @@ class PokerManager:
+         self.engines: Dict[str, epoker.PokerEngine] = {}
+         if self.store is not None:
+             self._reconcile_open_rounds()
++            self._reconcile_custodial_joins()
+ 
+     def _reconcile_open_rounds(self) -> None:
+         for row in self.store.load_open_poker_rounds():
+@@ -102,6 +112,45 @@ class PokerManager:
+             if len(participants) == epoker.NUM_PLAYERS:
+                 self._rebuild_engine(rnd)
+ 
++    def _resume_custodial_join(self, row: dict) -> str:
++        rnd = self.rounds.get(row["round_id"])
++        if rnd is None or rnd.status != "open":
++            raise ValueError("custodial poker join round is not open")
++        address = row["address"]
++        key = Key(**json.loads(row["key_json"]))
++        if address in rnd.participants:
++            self.store.mark_custodial_join("poker", rnd.id_hex, address, "APPLIED", int(time.time()))
++            return address
++        if len(rnd.participants) >= epoker.NUM_PLAYERS:
++            raise ValueError("round already has enough players")
++        self.bridge.buy_coins(
++            self.operator, address, rnd.buy_in,
++            operation_id=f"poker:fund:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("poker", rnd.id_hex, address, "FUNDED", int(time.time()))
++        self.bridge.join_poker(
++            key, rnd.round_id, rnd.buy_in,
++            operation_id=f"poker:join:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("poker", rnd.id_hex, address, "JOINED", int(time.time()))
++        rnd.participants[address] = Participant(key)
++        self._persist_participants(rnd)
++        if len(rnd.participants) == epoker.NUM_PLAYERS:
++            self._rebuild_engine(rnd)
++        self.store.mark_custodial_join("poker", rnd.id_hex, address, "APPLIED", int(time.time()))
++        return address
++
++    def _reconcile_custodial_joins(self, round_id_hex: str | None = None) -> Optional[str]:
++        recovered = None
++        for row in self.store.pending_custodial_joins("poker"):
++            if round_id_hex is not None and row["round_id"] != round_id_hex:
++                continue
++            try:
++                recovered = self._resume_custodial_join(row)
++            except Exception as exc:
++                logger.warning("poker custodial join remains pending: %s", exc)
++        return recovered
++
+     def _rebuild_engine(self, rnd: PokerRound) -> epoker.PokerEngine:
+         engine = epoker.PokerEngine(rnd.seed, rnd.small_blind, rnd.big_blind, (rnd.buy_in, rnd.buy_in))
+         for a in rnd.actions:
+@@ -113,11 +162,15 @@ class PokerManager:
              rnd.result = engine.result
          return engine
  
@@ -2200,7 +2406,7 @@ index 4014299..b771919 100644
          rnd = PokerRound(round_id, seed, commit, small_blind, big_blind, buy_in, rake_bps)
          self.rounds[rnd.id_hex] = rnd
          if self.store is not None:
-@@ -125,6 +134,7 @@ class PokerManager:
+@@ -125,23 +178,45 @@ class PokerManager:
                                                small_blind, big_blind, buy_in, rake_bps)
          return rnd
  
@@ -2208,12 +2414,26 @@ index 4014299..b771919 100644
      def join(self, round_id_hex: str, nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
-@@ -132,16 +142,23 @@ class PokerManager:
+             raise ValueError("round not open")
++        if self.store is not None:
++            recovered = self._reconcile_custodial_joins(round_id_hex)
++            if recovered is not None:
++                return recovered
          if len(rnd.participants) >= epoker.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          key = self.bridge.new_key(nickname or f"pplayer_{secrets.token_hex(3)}")
 -        self.bridge.buy_coins(self.operator, key.address, rnd.buy_in)
 -        self.bridge.join_poker(key, rnd.round_id, rnd.buy_in)
++        if self.store is not None:
++            self.store.prepare_custodial_join(
++                "poker", rnd.id_hex, key.address,
++                {"address": key.address, "public_key": key.public_key, "private_key": key.private_key},
++                {"amount": rnd.buy_in}, int(time.time()),
++            )
++            return self._resume_custodial_join(
++                self.store.get_custodial_join("poker", rnd.id_hex, key.address)
++            )
++        # In-memory development path has no restart guarantee.
 +        self.bridge.buy_coins(self.operator, key.address, rnd.buy_in,
 +                              operation_id=f"poker:fund:{rnd.id_hex}:{key.address}")
 +        self.bridge.join_poker(key, rnd.round_id, rnd.buy_in,
@@ -2234,7 +2454,7 @@ index 4014299..b771919 100644
          if len(rnd.participants) >= epoker.NUM_PLAYERS:
              raise ValueError("round already has enough players")
          addr = address.lower()
-@@ -158,7 +175,36 @@ class PokerManager:
+@@ -158,7 +233,36 @@ class PokerManager:
      def player_index(self, rnd: PokerRound, address: str) -> int:
          return rnd.player_order.index(address.lower())
  
@@ -2272,7 +2492,7 @@ index 4014299..b771919 100644
          """Validates and applies one betting action. Raises engine.poker.IllegalMove
          on an illegal action, or ValueError if the round/turn state doesn't
          allow one at all. Returns a HandResult once this action ends the
-@@ -171,6 +217,10 @@ class PokerManager:
+@@ -171,6 +275,10 @@ class PokerManager:
              raise ValueError("round does not have both players yet")
          if engine.finished:
              raise ValueError("hand already finished")
@@ -2283,7 +2503,7 @@ index 4014299..b771919 100644
          idx = self.player_index(rnd, address)
          if engine.turn != idx:
              raise ValueError("not this address's turn")
-@@ -198,6 +248,7 @@ class PokerManager:
+@@ -198,6 +306,7 @@ class PokerManager:
          return sum(rnd.buy_in for rnd in self.rounds.values()
                     if rnd.status == "open" and addr in rnd.participants)
  
@@ -2291,7 +2511,7 @@ index 4014299..b771919 100644
      def settle(self, round_id_hex: str) -> dict:
          rnd = self.rounds[round_id_hex]
          engine = self.engines[round_id_hex]
-@@ -206,7 +257,10 @@ class PokerManager:
+@@ -206,7 +315,10 @@ class PokerManager:
          order = rnd.player_order
          before = {a: self.bridge.account_balance(a) for a in order}
          proto_actions = [(a["action"], a["amount"]) for a in rnd.actions]
@@ -2304,26 +2524,32 @@ index 4014299..b771919 100644
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/rooms.py b/gameserver/rooms.py
-index 12b56c4..a33af43 100644
+index 12b56c4..5c19075 100644
 --- a/gameserver/rooms.py
 +++ b/gameserver/rooms.py
-@@ -15,6 +15,7 @@ operator/player keys needed to sign a settle for that round.
+@@ -14,7 +14,11 @@ operator/player keys needed to sign a settle for that round.
+ 
  from __future__ import annotations
  
++import json
++import logging
  import secrets
++import time
 +from threading import RLock
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
  
-@@ -23,6 +24,7 @@ from engine.rng import derive_seed, commitment
+@@ -23,6 +27,9 @@ from engine.rng import derive_seed, commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
 +from .synchronization import synchronized, settled_once
++
++logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -65,6 +67,8 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
+@@ -65,12 +72,15 @@ def _serialize_participants(participants: Dict[str, Participant]) -> dict:
  
  class RoomManager:
      def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
@@ -2332,10 +2558,56 @@ index 12b56c4..a33af43 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -93,13 +97,14 @@ class RoomManager:
+         self.rounds: Dict[str, Round] = {}
+         if self.store is not None:
+             self._reconcile_open_rounds()
++            self._reconcile_custodial_joins()
+ 
+     def _reconcile_open_rounds(self) -> None:
+         """Reload any round that was still open when the process last stopped,
+@@ -93,13 +103,53 @@ class RoomManager:
              )
              self.rounds[rnd.id_hex] = rnd
  
++    def _resume_custodial_join(self, row: dict) -> str:
++        rnd = self.rounds.get(row["round_id"])
++        if rnd is None or rnd.status != "open":
++            raise ValueError("custodial join round is not open")
++        address = row["address"]
++        payload = json.loads(row["payload_json"])
++        key = Key(**json.loads(row["key_json"]))
++        existing = rnd.participants.get(address)
++        if existing is not None:
++            if existing.num_cards != payload["num_cards"]:
++                raise ValueError("custodial join conflicts with persisted participant")
++            self.store.mark_custodial_join("bingo", rnd.id_hex, address, "APPLIED", int(time.time()))
++            return address
++        self.bridge.buy_coins(
++            self.operator, address, payload["amount"],
++            operation_id=f"bingo:fund:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("bingo", rnd.id_hex, address, "FUNDED", int(time.time()))
++        self.bridge.join_room(
++            key, rnd.round_id, payload["num_cards"], payload["amount"],
++            operation_id=f"bingo:join:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("bingo", rnd.id_hex, address, "JOINED", int(time.time()))
++        rnd.participants[address] = Participant(key, payload["num_cards"])
++        self._persist_participants(rnd)
++        self.store.mark_custodial_join("bingo", rnd.id_hex, address, "APPLIED", int(time.time()))
++        return address
++
++    def _reconcile_custodial_joins(self, round_id_hex: str | None = None) -> Optional[str]:
++        recovered = None
++        for row in self.store.pending_custodial_joins("bingo"):
++            if round_id_hex is not None and row["round_id"] != round_id_hex:
++                continue
++            try:
++                recovered = self._resume_custodial_join(row)
++            except Exception as exc:
++                logger.warning("bingo custodial join remains pending: %s", exc)
++        return recovered
++
 +    @synchronized
      def create_round(self, entry_fee: int = 100_000_000, rake_bps: int = 1_000,
                       payout_weights_bps=(10_000,), room: str = "") -> Round:
@@ -2348,7 +2620,7 @@ index 12b56c4..a33af43 100644
          rnd = Round(round_id, seed, commit, entry_fee, rake_bps, list(payout_weights_bps),
                      order=edraw.draw_order(seed), room=room)
          self.rounds[rnd.id_hex] = rnd
-@@ -108,24 +113,37 @@ class RoomManager:
+@@ -108,24 +158,51 @@ class RoomManager:
                                         list(payout_weights_bps), room, rnd.order)
          return rnd
  
@@ -2358,11 +2630,26 @@ index 12b56c4..a33af43 100644
          rnd = self.rounds[round_id_hex]
          if rnd.status != "open":
              raise ValueError("round not open")
++        if self.store is not None:
++            recovered = self._reconcile_custodial_joins(round_id_hex)
++            if recovered is not None:
++                return recovered
          key = self.bridge.new_key(nickname or f"player_{secrets.token_hex(3)}")
          cost = rnd.entry_fee * econ.CARD_COST_MULTIPLIER_BPS[num_cards] // 10_000
-         # server provisions the entry (mint) then escrows it via join
+-        # server provisions the entry (mint) then escrows it via join
 -        self.bridge.buy_coins(self.operator, key.address, cost)
 -        self.bridge.join_room(key, rnd.round_id, num_cards, cost)
++        # Persist the key and exact intent before either chain transaction.
++        if self.store is not None:
++            self.store.prepare_custodial_join(
++                "bingo", rnd.id_hex, key.address,
++                {"address": key.address, "public_key": key.public_key, "private_key": key.private_key},
++                {"num_cards": num_cards, "amount": cost}, int(time.time()),
++            )
++            return self._resume_custodial_join(
++                self.store.get_custodial_join("bingo", rnd.id_hex, key.address)
++            )
++        # In-memory development path has no restart guarantee.
 +        self.bridge.buy_coins(self.operator, key.address, cost,
 +                              operation_id=f"bingo:fund:{rnd.id_hex}:{key.address}")
 +        self.bridge.join_room(key, rnd.round_id, num_cards, cost,
@@ -2388,7 +2675,7 @@ index 12b56c4..a33af43 100644
          rnd.participants[address.lower()] = Participant(key=None, num_cards=num_cards)
          self._persist_participants(rnd)
          return address.lower()
-@@ -172,10 +190,16 @@ class RoomManager:
+@@ -172,10 +249,16 @@ class RoomManager:
                  out.append(addr)
          return out
  
@@ -2407,26 +2694,31 @@ index 12b56c4..a33af43 100644
          rnd.status = "settled"
          rnd.settle_tx_hash = tx_hash
 diff --git a/gameserver/roulette_rooms.py b/gameserver/roulette_rooms.py
-index d44c9d7..7233291 100644
+index d44c9d7..146dfcd 100644
 --- a/gameserver/roulette_rooms.py
 +++ b/gameserver/roulette_rooms.py
-@@ -16,6 +16,7 @@ escrowed bets with no key left able to sign the settle.
+@@ -15,7 +15,10 @@ escrowed bets with no key left able to sign the settle.
+ 
  from __future__ import annotations
  
++import json
++import logging
  import secrets
 +from threading import RLock
  import time
  from dataclasses import dataclass, field
  from typing import Dict, List, Optional
-@@ -25,6 +26,7 @@ from engine.rng import commitment
+@@ -25,6 +28,9 @@ from engine.rng import commitment
  
  from .chain import CanopyBridge, Key
  from .db import Store
 +from .synchronization import synchronized, settled_once
++
++logger = logging.getLogger(__name__)
  
  
  @dataclass
-@@ -67,6 +69,8 @@ def _serialize_bets(bets: Dict[str, Bet]) -> dict:
+@@ -67,12 +73,15 @@ def _serialize_bets(bets: Dict[str, Bet]) -> dict:
  
  class RouletteManager:
      def __init__(self, bridge: CanopyBridge, operator: Key, store: Optional[Store] = None):
@@ -2435,10 +2727,57 @@ index d44c9d7..7233291 100644
          self.bridge = bridge
          self.operator = operator
          self.store = store
-@@ -91,17 +95,20 @@ class RouletteManager:
+         self.rounds: Dict[str, RouletteRound] = {}
+         if self.store is not None:
+             self._reconcile_open_rounds()
++            self._reconcile_custodial_joins()
+ 
+     def _reconcile_open_rounds(self) -> None:
+         for row in self.store.load_open_roulette_rounds():
+@@ -91,30 +100,89 @@ class RouletteManager:
              )
              self.rounds[rnd.id_hex] = rnd
  
++    def _resume_custodial_join(self, row: dict) -> str:
++        rnd = self.rounds.get(row["round_id"])
++        if rnd is None or rnd.status != "open":
++            raise ValueError("custodial roulette bet round is not open")
++        address = row["address"]
++        payload = json.loads(row["payload_json"])
++        key = Key(**json.loads(row["key_json"]))
++        existing = rnd.bets.get(address)
++        expected = (payload["bet_type"], payload["bet_number"], payload["amount"])
++        if existing is not None:
++            if (existing.bet_type, existing.bet_number, existing.amount) != expected:
++                raise ValueError("custodial bet conflicts with persisted bet")
++            self.store.mark_custodial_join("roulette", rnd.id_hex, address, "APPLIED", int(time.time()))
++            return address
++        self.bridge.buy_coins(
++            self.operator, address, payload["amount"],
++            operation_id=f"roulette:fund:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("roulette", rnd.id_hex, address, "FUNDED", int(time.time()))
++        self.bridge.roulette_bet(
++            key, rnd.round_id, payload["bet_type"], payload["bet_number"], payload["amount"],
++            operation_id=f"roulette:bet:{rnd.id_hex}:{address}",
++        )
++        self.store.mark_custodial_join("roulette", rnd.id_hex, address, "JOINED", int(time.time()))
++        rnd.bets[address] = Bet(key, *expected)
++        self._persist_bets(rnd)
++        self.store.mark_custodial_join("roulette", rnd.id_hex, address, "APPLIED", int(time.time()))
++        return address
++
++    def _reconcile_custodial_joins(self, round_id_hex: str | None = None) -> Optional[str]:
++        recovered = None
++        for row in self.store.pending_custodial_joins("roulette"):
++            if round_id_hex is not None and row["round_id"] != round_id_hex:
++                continue
++            try:
++                recovered = self._resume_custodial_join(row)
++            except Exception as exc:
++                logger.warning("roulette custodial bet remains pending: %s", exc)
++        return recovered
++
 +    @synchronized
      def open_round(self, rake_bps: int) -> RouletteRound:
          seed = secrets.token_bytes(32)
@@ -2457,12 +2796,26 @@ index d44c9d7..7233291 100644
      def place_bet(self, round_id_hex: str, bet_type: str, bet_number: int, amount: int,
                    nickname: str | None = None) -> str:
          rnd = self.rounds[round_id_hex]
-@@ -109,12 +116,15 @@ class RouletteManager:
+         if rnd.status != "open":
              raise ValueError("round not open")
++        if self.store is not None:
++            recovered = self._reconcile_custodial_joins(round_id_hex)
++            if recovered is not None:
++                return recovered
          key = self.bridge.new_key(nickname or f"bettor_{secrets.token_hex(3)}")
-         # server provisions the stake (mint) then escrows it via roulette_bet
+-        # server provisions the stake (mint) then escrows it via roulette_bet
 -        self.bridge.buy_coins(self.operator, key.address, amount)
 -        self.bridge.roulette_bet(key, rnd.round_id, bet_type, bet_number, amount)
++        if self.store is not None:
++            self.store.prepare_custodial_join(
++                "roulette", rnd.id_hex, key.address,
++                {"address": key.address, "public_key": key.public_key, "private_key": key.private_key},
++                {"bet_type": bet_type, "bet_number": bet_number, "amount": amount}, int(time.time()),
++            )
++            return self._resume_custodial_join(
++                self.store.get_custodial_join("roulette", rnd.id_hex, key.address)
++            )
++        # In-memory development path has no restart guarantee.
 +        self.bridge.buy_coins(self.operator, key.address, amount,
 +                              operation_id=f"roulette:fund:{rnd.id_hex}:{key.address}")
 +        self.bridge.roulette_bet(key, rnd.round_id, bet_type, bet_number, amount,
@@ -2475,7 +2828,7 @@ index d44c9d7..7233291 100644
      def register_external_bet(self, round_id_hex: str, address: str, bet_type: str,
                                bet_number: int, amount: int) -> str:
          """Record a bettor who bet on-chain from their OWN wallet. The server
-@@ -122,6 +132,13 @@ class RouletteManager:
+@@ -122,6 +190,13 @@ class RouletteManager:
          chain itself pays from its own bet records, so this is bookkeeping
          only (needed to report this address's delta after settle)."""
          rnd = self.rounds[round_id_hex]
@@ -2489,7 +2842,7 @@ index d44c9d7..7233291 100644
          rnd.bets[address.lower()] = Bet(key=None, bet_type=bet_type, bet_number=bet_number, amount=amount)
          self._persist_bets(rnd)
          return address.lower()
-@@ -144,10 +161,14 @@ class RouletteManager:
+@@ -144,10 +219,14 @@ class RouletteManager:
                  total += b.amount
          return total
  
@@ -3073,6 +3426,130 @@ index 0000000..34b5300
 +            ReceiptBridge(valid_result()).transaction_receipt(
 +                "bad", sender=SENDER, message_type="join_room",
 +            )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_custodial_join_recovery.py b/tests/test_custodial_join_recovery.py
+new file mode 100644
+index 0000000..231142f
+--- /dev/null
++++ b/tests/test_custodial_join_recovery.py
+@@ -0,0 +1,118 @@
++"""Fault-injection coverage for the fund -> join custodial saga.
++
++These legacy custodial helpers are not the real-money wallet path, but they
++must still be restart-safe: a lost response after either chain transaction
++cannot lose the generated player key or mint/escrow twice on recovery.
++"""
++
++import os
++import tempfile
++import unittest
++
++from gameserver.db import Store
++from gameserver.domino_rooms import DominoManager
++from gameserver.poker_rooms import PokerManager
++from gameserver.roulette_rooms import RouletteManager
++from gameserver.rooms import RoomManager
++
++from .fakes import FakeBridge
++
++
++class AcceptedThenCrashedBridge(FakeBridge):
++    """Idempotent chain double that loses the first join response."""
++
++    def __init__(self):
++        super().__init__()
++        self.applied = set()
++        self.apply_counts = {}
++        self.crashed = False
++
++    def _accept(self, operation_id, apply):
++        if operation_id not in self.applied:
++            apply()
++            self.applied.add(operation_id)
++            self.apply_counts[operation_id] = self.apply_counts.get(operation_id, 0) + 1
++
++    def buy_coins(self, admin, recipient, amount, operation_id=None):
++        self._accept(operation_id, lambda: self.balances.__setitem__(
++            recipient, self.balances.get(recipient, 0) + amount,
++        ))
++        return "0xbuy"
++
++    def _join(self, player, amount, operation_id, tx_hash):
++        self._accept(operation_id, lambda: self.balances.__setitem__(
++            player.address, self.balances.get(player.address, 0) - amount,
++        ))
++        if not self.crashed:
++            self.crashed = True
++            raise ConnectionError("response lost after accepted join")
++        return tx_hash
++
++    def join_room(self, player, round_id, num_cards, amount, operation_id=None):
++        return self._join(player, amount, operation_id, "0xjoin")
++
++    def roulette_bet(self, player, round_id, bet_type, bet_number, amount, operation_id=None):
++        return self._join(player, amount, operation_id, "0xbet")
++
++    def join_domino(self, player, round_id, amount, operation_id=None):
++        return self._join(player, amount, operation_id, "0xjoindomino")
++
++    def join_poker(self, player, round_id, amount, operation_id=None):
++        return self._join(player, amount, operation_id, "0xjoinpoker")
++
++
++class CustodialJoinRecoveryTests(unittest.TestCase):
++    def _exercise(self, game):
++        with tempfile.TemporaryDirectory() as tmp:
++            store = Store(os.path.join(tmp, "recovery.db"))
++            self.addCleanup(store.close)
++            bridge = AcceptedThenCrashedBridge()
++            operator = bridge.new_key("operator")
++
++            if game == "bingo":
++                manager = RoomManager(bridge, operator, store)
++                rnd = manager.create_round(entry_fee=100, room="classic")
++                invoke = lambda: manager.add_player(rnd.id_hex, 1)
++                manager_type = RoomManager
++                contains = lambda fresh, address: address in fresh.rounds[rnd.id_hex].participants
++            elif game == "roulette":
++                manager = RouletteManager(bridge, operator, store)
++                rnd = manager.open_round(1000)
++                invoke = lambda: manager.place_bet(rnd.id_hex, "red", 0, 100)
++                manager_type = RouletteManager
++                contains = lambda fresh, address: address in fresh.rounds[rnd.id_hex].bets
++            elif game == "domino":
++                manager = DominoManager(bridge, operator, store)
++                rnd = manager.open_round(100, 1000)
++                invoke = lambda: manager.join(rnd.id_hex)
++                manager_type = DominoManager
++                contains = lambda fresh, address: address in fresh.rounds[rnd.id_hex].participants
++            else:
++                manager = PokerManager(bridge, operator, store)
++                rnd = manager.open_round(10, 20, 100, 1000)
++                invoke = lambda: manager.join(rnd.id_hex)
++                manager_type = PokerManager
++                contains = lambda fresh, address: address in fresh.rounds[rnd.id_hex].participants
++
++            with self.assertRaisesRegex(ConnectionError, "response lost"):
++                invoke()
++            pending = store.pending_custodial_joins(game)
++            self.assertEqual(len(pending), 1)
++            address = pending[0]["address"]
++            self.assertEqual(pending[0]["state"], "FUNDED")
++
++            fresh = manager_type(bridge, operator, store)
++            self.assertTrue(contains(fresh, address))
++            self.assertEqual(store.get_custodial_join(game, rnd.id_hex, address)["state"], "APPLIED")
++            self.assertEqual(bridge.balances[address], 0)
++            related = [count for op, count in bridge.apply_counts.items() if address in op]
++            self.assertEqual(related, [1, 1], "fund and join must each apply exactly once")
++
++    def test_all_custodial_game_joins_resume_after_lost_response(self):
++        for game in ("bingo", "roulette", "domino", "poker"):
++            with self.subTest(game=game):
++                self._exercise(game)
 +
 +
 +if __name__ == "__main__":
