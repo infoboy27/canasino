@@ -625,9 +625,12 @@ a { color: inherit; text-decoration: none; }
 
 .dm-board { border:1px solid var(--cx-line); border-radius:12px; background:rgba(255,255,255,.015); padding:18px; display:grid; gap:8px; place-items:center; min-height:90px; }
 .dm-board-hint { margin:0; color:#616a62; font-size:11px; }
-.dm-board-line { display:flex; align-items:center; gap:10px; }
-.dm-end-label { width:38px; height:38px; border-radius:50%; border:1px solid rgba(212,175,55,.35); background:rgba(212,175,55,.08); color:var(--cx-gold-soft); font:700 15px 'Fraunces',serif; display:grid; place-items:center; }
+.dm-board-line { display:flex; align-items:center; gap:10px; max-width:100%; }
+.dm-end-label { flex:none; width:38px; height:38px; border-radius:50%; border:1px solid rgba(212,175,55,.35); background:rgba(212,175,55,.08); color:var(--cx-gold-soft); font:700 15px 'Fraunces',serif; display:grid; place-items:center; }
 .dm-board-strip { width:120px; height:2px; background:repeating-linear-gradient(90deg,rgba(255,255,255,.18) 0 6px,transparent 6px 12px); }
+.dm-board-chain { display:flex; align-items:center; gap:4px; overflow-x:auto; padding:6px 2px; scrollbar-width:thin; }
+.dm-board-chain .dm-tile { flex:none; cursor:default; padding:6px 5px; background:linear-gradient(160deg,#242a25,#161b16); border-color:rgba(255,255,255,.14); }
+.dm-board-chain .dm-tile:hover { transform:none; border-color:rgba(255,255,255,.14); }
 .dm-turn-copy { margin:0; color:#9aa39c; font-size:11px; }
 
 .dm-end-choice { display:flex; align-items:center; gap:8px; font-size:11px; color:#9aa39c; }

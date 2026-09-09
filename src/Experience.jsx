@@ -1047,6 +1047,35 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
   )
 }
 
+// Rebuild the line of tiles on the table (visual left-to-right) from the
+// public move log. Each tile is oriented [innerPipTowardLeftEnd, ...] so the
+// numbers read continuously along the chain.
+function reconstructDominoBoard(moves) {
+  const tiles = []
+  let left = null
+  let right = null
+  for (const move of moves || []) {
+    if (move.action !== 'play' || !Array.isArray(move.tile)) continue
+    const [a, b] = move.tile
+    if (tiles.length === 0) {
+      tiles.push([a, b])
+      left = a
+      right = b
+      continue
+    }
+    if (move.end === 'left') {
+      const outer = a === left ? b : a
+      tiles.unshift([outer, left])
+      left = outer
+    } else {
+      const outer = a === right ? b : a
+      tiles.push([right, outer])
+      right = outer
+    }
+  }
+  return tiles
+}
+
 function legalDominoEnds(tile, ends) {
   if (!ends) return ['none']
   const [left, right] = ends
@@ -1066,6 +1095,7 @@ function DominoRoom({ account, onConnect }) {
   const [botAddress, setBotAddress] = useState(null)
   const [myHand, setMyHand] = useState([])
   const [ends, setEnds] = useState(null)
+  const [boardTiles, setBoardTiles] = useState([])
   const [turn, setTurn] = useState(null)
   const [boneyardRemaining, setBoneyardRemaining] = useState(null)
   const [joinInput, setJoinInput] = useState('')
@@ -1099,11 +1129,13 @@ function DominoRoom({ account, onConnect }) {
         if (status.turn != null) setTurn(status.turn)
         if (status.ends !== undefined) setEnds(status.ends ?? null)
         if (status.boneyardRemaining != null) setBoneyardRemaining(status.boneyardRemaining)
+        if (Array.isArray(status.moves)) setBoardTiles(reconstructDominoBoard(status.moves))
         if (status.status === 'settled') {
           // submitMove / the bot effect carry the rich settle result (address
           // payouts); this only flips the view if that response was lost.
           getDominoProof(roundId).then((p) => {
             setProof(p)
+            if (Array.isArray(p.moves)) setBoardTiles(reconstructDominoBoard(p.moves))
             setResult((prev) => prev || {
               winners: (p.winners || []).map((s) => status.players?.[s]).filter(Boolean),
               reason: p.reason, payouts: {},
@@ -1198,11 +1230,17 @@ function DominoRoom({ account, onConnect }) {
           if (msg.type === 'move') {
             setTurn(msg.nextTurn)
             setEnds(msg.endsAfter)
+            getDominoRound(roundId)
+              .then((s) => Array.isArray(s.moves) && setBoardTiles(reconstructDominoBoard(s.moves)))
+              .catch(() => null)
           }
           if (msg.type === 'settled') {
             setMode('settled')
             setResult(msg)
-            getDominoProof(roundId).then(setProof).catch(() => null)
+            getDominoProof(roundId).then((p) => {
+              setProof(p)
+              if (Array.isArray(p.moves)) setBoardTiles(reconstructDominoBoard(p.moves))
+            }).catch(() => null)
           }
         } catch {
           // Ignore malformed socket frames.
@@ -1266,7 +1304,7 @@ function DominoRoom({ account, onConnect }) {
         entryFee: wireAmount(info.entryFee), rakeBps: wireAmount(info.rakeBps),
         chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId), rpcUrl: info.rpcUrl,
       }
-      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      setRoundId(rid); setRoundInfo(infoObj); setBoardTiles([]); setMyHand([]); setEnds(null); setPhase('round-ready')
       const ok = await performJoin(rid, infoObj)
       if (ok) { setMySeat(0); setPlayers([account.address]); setMode('waiting') }
     } catch (err) {
@@ -1306,7 +1344,7 @@ function DominoRoom({ account, onConnect }) {
         entryFee: wireAmount(info.entryFee), rakeBps: wireAmount(info.rakeBps),
         chainId: wireAmount(info.chainId), networkId: wireAmount(info.networkId), rpcUrl: info.rpcUrl,
       }
-      setRoundId(rid); setRoundInfo(infoObj); setPhase('round-ready')
+      setRoundId(rid); setRoundInfo(infoObj); setBoardTiles([]); setMyHand([]); setEnds(null); setPhase('round-ready')
       const ok = await performJoin(rid, infoObj, { expectHand: true })
       if (ok) { setMySeat(1); setMode('playing') }
     } catch (err) {
@@ -1414,12 +1452,16 @@ function DominoRoom({ account, onConnect }) {
               </div>
 
               <div className="dm-board">
-                {ends == null && mode === 'playing' && <span className="dm-board-hint">Table is empty — play any tile to open it.</span>}
-                {ends != null && (
+                {boardTiles.length === 0 && mode === 'playing' && <span className="dm-board-hint">Table is empty — play any tile to open it.</span>}
+                {boardTiles.length > 0 && (
                   <div className="dm-board-line">
-                    <span className="dm-end-label">{ends[0]}</span>
-                    <span className="dm-board-strip" />
-                    <span className="dm-end-label">{ends[1]}</span>
+                    {ends != null && <span className="dm-end-label">{ends[0]}</span>}
+                    <div className="dm-board-chain">
+                      {boardTiles.map((tile, index) => (
+                        <DominoTile key={`b-${index}-${tile[0]}-${tile[1]}`} tile={tile} />
+                      ))}
+                    </div>
+                    {ends != null && <span className="dm-end-label">{ends[1]}</span>}
                   </div>
                 )}
                 {mode === 'playing' && (
