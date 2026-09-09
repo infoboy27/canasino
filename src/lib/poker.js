@@ -5,8 +5,18 @@ export function openPokerRound() {
   return jsonPost('/poker/rounds')
 }
 
-export function joinPokerTable(roundId) {
+// Seat a custodial "practice opponent" (operator-funded, operator-signed).
+// Local valueless stacks only -- see PRACTICE_OPPONENT in ./api.js.
+export function addPokerOpponent(roundId) {
   return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/join`)
+}
+
+// Drive the practice opponent's action. The operator bearer bypasses the
+// per-action wallet grant, so no sequence/state hash is needed.
+export function botPokerAction(roundId, address, action, amount = 0) {
+  return jsonPost(`/poker/rounds/${encodeURIComponent(roundId)}/action`, {
+    address, action, amount,
+  })
 }
 
 export function registerPokerJoin(roundId, address, txHash) {

@@ -102,6 +102,14 @@ export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = 
 // browser against the isolated Canopy node.
 const OPERATOR_TOKEN = String(import.meta.env?.VITE_OPERATOR_TOKEN ?? '')
 
+// A local valueless stack with an operator token can seat a custodial
+// "practice opponent" so heads-up games (Domino/Poker) are playable solo.
+// This is impossible in a production build -- no operator token ships -- and
+// is additionally opt-in via VITE_ALLOW_PRACTICE_OPPONENT.
+export const PRACTICE_OPPONENT =
+  Boolean(OPERATOR_TOKEN) &&
+  ['1', 'true'].includes(String(import.meta.env?.VITE_ALLOW_PRACTICE_OPPONENT ?? '').toLowerCase())
+
 /**
  * @returns {Promise<{roundId?: string, round_id?: string, rakeBps?: number, minBet?: number, maxBet?: number, settled?: object}>}
  */

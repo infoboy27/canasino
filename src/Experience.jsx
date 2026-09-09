@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
-import { assertCanAfford } from './lib/api.js'
+import { assertCanAfford, PRACTICE_OPPONENT } from './lib/api.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
 import {
   connectFleet,
@@ -35,6 +35,8 @@ import {
   registerRouletteBet,
 } from './lib/roulette'
 import {
+  addDominoOpponent,
+  botDominoMove,
   getDominoHand,
   getDominoProof,
   getDominoRound,
@@ -45,6 +47,8 @@ import {
   registerDominoJoin,
 } from './lib/domino'
 import {
+  addPokerOpponent,
+  botPokerAction,
   getPokerHand,
   getPokerProof,
   getPokerRound,
@@ -1058,6 +1062,7 @@ function DominoRoom({ account, onConnect }) {
   const [roundInfo, setRoundInfo] = useState(null)
   const [mySeat, setMySeat] = useState(null)
   const [, setPlayers] = useState([])
+  const [botAddress, setBotAddress] = useState(null)
   const [myHand, setMyHand] = useState([])
   const [ends, setEnds] = useState(null)
   const [turn, setTurn] = useState(null)
@@ -1084,26 +1089,81 @@ function DominoRoom({ account, onConnect }) {
     return () => window.clearInterval(id)
   }, [mode, roundId])
 
+  // The WS pushes one state frame on connect; if the engine wasn't built yet
+  // (2nd join still finalizing entropy) that frame carries turn=null. Poll the
+  // round until turn/ends are populated so the first move isn't deadlocked.
+  useEffect(() => {
+    if (mode !== 'playing' || !roundId || turn != null) return undefined
+    const id = window.setInterval(() => {
+      getDominoRound(roundId).then((status) => {
+        if (status.turn != null || status.ends != null) {
+          setTurn(status.turn ?? 0)
+          setEnds(status.ends ?? null)
+          setBoneyardRemaining(status.boneyardRemaining ?? null)
+        }
+      }).catch(() => null)
+    }, 2500)
+    return () => window.clearInterval(id)
+  }, [mode, roundId, turn])
+
   // The table creator (seat 0) joins before an opponent exists, so their hand
   // is not dealt until the second player triggers prepare_outcome. Fetch it
-  // once the table is live, retrying while the entropy window finalizes (425).
+  // once the table is live, retrying while the entropy window finalizes -- the
+  // 2nd join holds the manager lock through that wait, so a fetch here can 425
+  // OR time out; either way, keep trying.
   useEffect(() => {
     if (mode !== 'playing' || !roundId || !account || myHand.length > 0) return undefined
     let cancelled = false
     ;(async () => {
-      for (let attempt = 0; attempt < 40 && !cancelled; attempt++) {
+      for (let attempt = 0; attempt < 60 && !cancelled; attempt++) {
         try {
           const hand = await getDominoHand(roundId, account.address)
-          if (!cancelled) setMyHand(hand.hand)
-          return
-        } catch (err) {
-          if (err?.status !== 425) { if (!cancelled) setError(err?.message || 'Could not load your hand.'); return }
-          await new Promise((r) => setTimeout(r, 3000))
-        }
+          if (Array.isArray(hand.hand) && hand.hand.length > 0) { if (!cancelled) setMyHand(hand.hand); return }
+        } catch { /* 425 or timeout while the entropy window finalizes */ }
+        await new Promise((r) => setTimeout(r, 3000))
       }
     })()
     return () => { cancelled = true }
   }, [mode, roundId, account, myHand.length])
+
+  // Practice opponent: when it is the bot's turn, play the first legal tile,
+  // drawing/passing as the rules require. Local valueless stacks only.
+  const botBusy = useRef(false)
+  useEffect(() => {
+    if (mode !== 'playing' || !roundId || !botAddress) return undefined
+    if (turn == null || turn === mySeat || botBusy.current) return undefined
+    botBusy.current = true
+    let cancelled = false
+    ;(async () => {
+      try {
+        await new Promise((r) => setTimeout(r, 700))
+        let boneyard = boneyardRemaining ?? 0
+        for (let guard = 0; guard < 30 && !cancelled; guard++) {
+          let hand
+          try { ({ hand } = await getDominoHand(roundId, botAddress)) }
+          catch { await new Promise((r) => setTimeout(r, 2000)); continue }
+          const playable = hand.find((tile) => (ends == null) || legalDominoEnds(tile, ends).length > 0)
+          if (playable) {
+            const outs = ends == null ? ['none'] : legalDominoEnds(playable, ends)
+            await botDominoMove(roundId, botAddress, 'play', playable, outs[0] === 'none' ? undefined : outs[0])
+            return
+          }
+          if (boneyard > 0) {
+            await botDominoMove(roundId, botAddress, 'draw')
+            boneyard -= 1
+            continue
+          }
+          await botDominoMove(roundId, botAddress, 'pass')
+          return
+        }
+      } catch (err) {
+        if (!cancelled) setError(err?.message || 'The practice opponent could not move.')
+      } finally {
+        botBusy.current = false
+      }
+    })()
+    return () => { cancelled = true; botBusy.current = false }
+  }, [mode, roundId, botAddress, turn, mySeat, ends, boneyardRemaining])
 
   useEffect(() => {
     if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
@@ -1193,6 +1253,28 @@ function DominoRoom({ account, onConnect }) {
       if (ok) { setMySeat(0); setPlayers([account.address]); setMode('waiting') }
     } catch (err) {
       setError(`Could not open a table: ${err.message}`)
+    }
+  }
+
+  async function handleAddOpponent() {
+    setError('')
+    const mine = account.address.toLowerCase()
+    try {
+      const seated = await addDominoOpponent(roundId)
+      setBotAddress(String(seated.player).toLowerCase())
+    } catch {
+      // The custodial seat is still settling server-side (the join call holds
+      // the lock through the entropy wait and can outrun the HTTP timeout).
+      // Recover the bot address from the round's player list.
+      for (let i = 0; i < 30; i++) {
+        try {
+          const rnd = await getDominoRound(roundId)
+          const other = (rnd.players || []).map((p) => p.toLowerCase()).find((p) => p !== mine)
+          if (other) { setBotAddress(other); return }
+        } catch { /* keep polling */ }
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+      setError('The practice opponent is taking longer than expected to seat. Refresh and retry.')
     }
   }
 
@@ -1292,7 +1374,15 @@ function DominoRoom({ account, onConnect }) {
                 <span className="cx-eyebrow">OPPONENT</span>
                 <div className="dm-hand face-down-row">
                   {mode === 'waiting'
-                    ? <p className="dm-waiting-copy">Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                    ? (
+                      <div className="dm-waiting-copy">
+                        <p>Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                        {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
+                          <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                        )}
+                        {botAddress && <p>Practice opponent seated — dealing…</p>}
+                      </div>
+                    )
                     : Array.from({ length: opponentHandSize }).map((_, index) => <DominoTile key={index} faceDown />)}
                 </div>
               </div>
@@ -1375,6 +1465,7 @@ function PokerRoom({ account, onConnect }) {
   const [roundInfo, setRoundInfo] = useState(null)
   const [mySeat, setMySeat] = useState(null)
   const [, setPlayers] = useState([])
+  const [botAddress, setBotAddress] = useState(null)
   const [myHole, setMyHole] = useState([])
   const [table, setTable] = useState({
     turn: null, street: null, board: [], pot: 0,
@@ -1412,26 +1503,59 @@ function PokerRoom({ account, onConnect }) {
     return () => window.clearInterval(id)
   }, [mode, roundId])
 
+  // The WS pushes one state frame on connect; if the engine wasn't built yet
+  // (2nd buy-in still finalizing entropy) that frame carries turn=null. Poll
+  // the round until the table is live so the first action isn't deadlocked.
+  useEffect(() => {
+    if (mode !== 'playing' || !roundId || table.turn != null) return undefined
+    const id = window.setInterval(() => {
+      getPokerRound(roundId).then((status) => {
+        if (status.turn != null) applyTable(status)
+      }).catch(() => null)
+    }, 2500)
+    return () => window.clearInterval(id)
+  }, [mode, roundId, table.turn])
+
   // The table creator (seat 0) buys in before an opponent exists, so their
   // hole cards are not dealt until the second player triggers prepare_outcome.
-  // Fetch them once the table is live, retrying through the entropy window (425).
+  // Fetch them once the table is live, retrying while the entropy window
+  // finalizes -- the 2nd join holds the manager lock through that wait, so a
+  // fetch here can 425 OR time out; either way, keep trying.
   useEffect(() => {
     if (mode !== 'playing' || !roundId || !account || myHole.length > 0) return undefined
     let cancelled = false
     ;(async () => {
-      for (let attempt = 0; attempt < 40 && !cancelled; attempt++) {
+      for (let attempt = 0; attempt < 60 && !cancelled; attempt++) {
         try {
           const hole = await getPokerHand(roundId, account.address)
-          if (!cancelled) setMyHole(hole.hole)
-          return
-        } catch (err) {
-          if (err?.status !== 425) { if (!cancelled) setError(err?.message || 'Could not load your hole cards.'); return }
-          await new Promise((r) => setTimeout(r, 3000))
-        }
+          if (Array.isArray(hole.hole) && hole.hole.length > 0) { if (!cancelled) setMyHole(hole.hole); return }
+        } catch { /* 425 or timeout while the entropy window finalizes */ }
+        await new Promise((r) => setTimeout(r, 3000))
       }
     })()
     return () => { cancelled = true }
   }, [mode, roundId, account, myHole.length])
+
+  // Practice opponent: check/call on every street so the hand always reaches
+  // showdown. Local valueless stacks only.
+  const botBusy = useRef(false)
+  useEffect(() => {
+    if (mode !== 'playing' || !roundId || !botAddress || table.finished) return undefined
+    if (table.turn == null || table.turn === mySeat || botBusy.current) return undefined
+    botBusy.current = true
+    let cancelled = false
+    ;(async () => {
+      try {
+        await new Promise((r) => setTimeout(r, 700))
+        if (!cancelled) await botPokerAction(roundId, botAddress, 'check_call', 0)
+      } catch (err) {
+        if (!cancelled) setError(err?.message || 'The practice opponent could not act.')
+      } finally {
+        botBusy.current = false
+      }
+    })()
+    return () => { cancelled = true; botBusy.current = false }
+  }, [mode, roundId, botAddress, table.turn, table.finished, mySeat])
 
   useEffect(() => {
     if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
@@ -1530,6 +1654,28 @@ function PokerRoom({ account, onConnect }) {
     }
   }
 
+  async function handleAddOpponent() {
+    setError('')
+    const mine = account.address.toLowerCase()
+    try {
+      const seated = await addPokerOpponent(roundId)
+      setBotAddress(String(seated.player).toLowerCase())
+    } catch {
+      // The custodial seat is still settling server-side (the join call holds
+      // the lock through the entropy wait and can outrun the HTTP timeout).
+      // Recover the bot address from the round's player list.
+      for (let i = 0; i < 30; i++) {
+        try {
+          const rnd = await getPokerRound(roundId)
+          const other = (rnd.players || []).map((p) => p.toLowerCase()).find((p) => p !== mine)
+          if (other) { setBotAddress(other); return }
+        } catch { /* keep polling */ }
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+      setError('The practice opponent is taking longer than expected to seat. Refresh and retry.')
+    }
+  }
+
   async function handleJoinTable() {
     const rid = joinInput.trim()
     if (!rid) return
@@ -1620,7 +1766,15 @@ function PokerRoom({ account, onConnect }) {
                 <span className="cx-eyebrow">OPPONENT{table.folded[oppSeat] ? ' · FOLDED' : table.allIn[oppSeat] ? ' · ALL-IN' : ''}</span>
                 <div className="pk-hand">
                   {mode === 'waiting'
-                    ? <p className="dm-waiting-copy">Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                    ? (
+                      <div className="dm-waiting-copy">
+                        <p>Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
+                        {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
+                          <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                        )}
+                        {botAddress && <p>Practice opponent seated — dealing…</p>}
+                      </div>
+                    )
                     : <><PlayingCard faceDown /><PlayingCard faceDown /></>}
                 </div>
                 {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[oppSeat])} CNPY</strong>}

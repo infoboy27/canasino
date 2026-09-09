@@ -5,8 +5,19 @@ export function openDominoRound() {
   return jsonPost('/domino/rounds')
 }
 
-export function joinDominoTable(roundId) {
+// Seat a custodial "practice opponent" (operator-funded, operator-signed).
+// Local valueless stacks only -- see PRACTICE_OPPONENT in ./api.js.
+export function addDominoOpponent(roundId) {
   return jsonPost(`/domino/rounds/${encodeURIComponent(roundId)}/join`)
+}
+
+// Drive the practice opponent's turn. The operator bearer bypasses the
+// per-move wallet grant (authorize_wallet_action returns False for it), so
+// no sequence/state hash is needed.
+export function botDominoMove(roundId, address, action, tile, end) {
+  return jsonPost(`/domino/rounds/${encodeURIComponent(roundId)}/move`, {
+    address, action, tile: tile || null, end: end || null,
+  })
 }
 
 export function registerDominoJoin(roundId, address, txHash) {
