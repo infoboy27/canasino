@@ -105,3 +105,12 @@ export function IconSparkle(props) {
     </svg>
   )
 }
+
+export function IconMilestone(props) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M6 21V4" />
+      <path d="M6 5h11l-2.5 3L17 11H6" />
+    </svg>
+  )
+}

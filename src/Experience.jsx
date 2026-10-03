@@ -59,7 +59,7 @@ import {
   postPokerAction,
   registerPokerJoin,
 } from './lib/poker'
-import { IconBracket, IconBroadcast, IconChip, IconCoinLoop, IconGithub, IconHome, IconLaurel, IconShieldCheck, IconSparkle, IconStarBadge } from './lib/icons'
+import { IconBracket, IconBroadcast, IconChip, IconCoinLoop, IconGithub, IconHome, IconLaurel, IconMilestone, IconShieldCheck, IconSparkle, IconStarBadge } from './lib/icons'
 import './experience.css'
 
 const games = [
@@ -76,6 +76,7 @@ const nav = [
   ['home', IconHome, 'Casino'],
   ['games', IconChip, 'Games'],
   ['rooms', IconBroadcast, 'Table previews'],
+  ['roadmap', IconMilestone, 'Roadmap'],
   ['fairness', IconShieldCheck, 'Provably Fair'],
   ['rewards', IconLaurel, 'Rewards'],
 ]
@@ -2058,6 +2059,58 @@ function Games({ onPlay }) {
   )
 }
 
+const ROADMAP_PHASES = [
+  {
+    status: 'shipped',
+    title: 'Roulette, Domino, Poker — built end to end',
+    body: 'Game logic, on-chain economics, server and table UI for all three, each settled from an on-chain commit-reveal round.',
+  },
+  {
+    status: 'shipped',
+    title: 'Fair-randomness-v2',
+    body: 'Settlement moves from a bare operator-revealed seed to consensus-authenticated entropy: a bonded operator closes a round, a future block window finalizes before any outcome is derivable, and the plugin independently replays the result.',
+  },
+  {
+    status: 'progress',
+    title: 'Rolling out to the live validator',
+    body: 'Shipping in stages so nothing on the real chain breaks mid-flight: Poker support first, the randomness upgrade once its consensus-level changes are proven safe end to end.',
+  },
+  {
+    status: 'next',
+    title: 'Security close-out before real money',
+    body: 'An external security audit, signature verification on the auto-updater, and a final confirmation that every exposed credential has been rotated — the gate before any real-money launch.',
+  },
+  {
+    status: 'future',
+    title: 'Pool, Crash, and the rewards layer',
+    body: 'Two more table games, plus rakeback, VIP progression, tournaments and cosmetic ownership — the retention layer for after launch.',
+  },
+]
+
+const ROADMAP_STATUS_LABEL = { shipped: 'Shipped', progress: 'In progress', next: 'Next', future: 'Future' }
+
+function Roadmap() {
+  return (
+    <section className="cx-roadmap" id="roadmap">
+      <div className="cx-section-heading">
+        <div><span className="cx-eyebrow">WHERE THINGS STAND</span><h2>Built in the open, <em>shipped in stages.</em></h2></div>
+        <p>The graduation progress above funds Canasino's own chain. This is the product roadmap running alongside it — what's live, what's being rolled out carefully, and what's still ahead.</p>
+      </div>
+      <div className="roadmap-list">
+        {ROADMAP_PHASES.map((phase) => (
+          <div className={`roadmap-phase roadmap-${phase.status}`} key={phase.title}>
+            <span className={`roadmap-pill roadmap-pill-${phase.status}`}>{ROADMAP_STATUS_LABEL[phase.status]}</span>
+            <div className="roadmap-body">
+              <h3>{phase.title}</h3>
+              <p>{phase.body}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function Fairness() {
   return (
     <section className="cx-fairness" id="fairness">
@@ -2216,6 +2269,7 @@ export default function Experience() {
             <>
               <Home onPlay={play} />
               <Games onPlay={play} />
+              <Roadmap />
               <Fairness />
               <Rewards />
             </>
