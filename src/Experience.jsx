@@ -1992,7 +1992,7 @@ function GraduationBanner() {
             ? <>Canasino's chain is still a virtual listing on Canopy's launchpad. <strong>{wholeCnpy(data.cnpyRemaining)} CNPY</strong> more in trading volume and it graduates into its own independent chain.</>
             : 'Loading live graduation progress…'}
         </p>
-        <a className="cx-gold-button hero-button" href={tradeUrl} target="_blank" rel="noreferrer">
+        <a className="cx-gold-button graduation-button" href={tradeUrl} target="_blank" rel="noreferrer">
           <span>Trade {data?.tokenSymbol || 'CASN'} to help it graduate</span><b>↗</b>
         </a>
       </div>
