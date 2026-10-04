@@ -141,7 +141,7 @@ export const PRACTICE_OPPONENT =
   ['1', 'true'].includes(String(import.meta.env?.VITE_ALLOW_PRACTICE_OPPONENT ?? '').toLowerCase())
 
 /**
- * @returns {Promise<{roundId?: string, round_id?: string, rakeBps?: number, minBet?: number, maxBet?: number, settled?: object}>}
+ * @returns {Promise<{roundId?: string, round_id?: string, rakeBps?: number, minBet?: number, maxBet?: number, settled?: object, player?: string}>}
  */
 export async function jsonPost(path, body = {}) {
   requireWagering()
