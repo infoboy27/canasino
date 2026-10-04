@@ -2066,7 +2066,7 @@ const ROADMAP_PHASES = [
     body: 'Game logic, on-chain economics, server and table UI for all three, each settled from an on-chain commit-reveal round.',
   },
   {
-    status: 'shipped',
+    status: 'progress',
     title: 'Fair-randomness-v2',
     body: 'Settlement moves from a bare operator-revealed seed to consensus-authenticated entropy: a bonded operator closes a round, a future block window finalizes before any outcome is derivable, and the plugin independently replays the result.',
   },
