@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, jsonGet, PRACTICE_OPPONENT } from './lib/api.js'
 import { openMoveSession } from './lib/session.js'
+import { bestHand } from './lib/pokerEval.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
 import {
   connectFleet,
@@ -130,6 +131,12 @@ function shortAddress(address = '') {
 
 function cnpy(raw) {
   try { return formatTokens(raw ?? 0) } catch { return 'Unavailable' }
+}
+
+// Display-only, 2 decimals (e.g. the win counter) -- never used for amounts that are signed or sent.
+function cnpyShort(raw) {
+  const cents = Math.round(Number(raw || 0) / 10_000)
+  return Number.isFinite(cents) ? (cents / 100).toFixed(2).replace(/\.?0+$/, '') || '0' : '—'
 }
 
 function timeLabel() {
@@ -481,15 +488,43 @@ function DominoTile({ tile = null, faceDown = false, orientation = 'horizontal',
 }
 
 const SUIT_SYMBOL = { s: '♠', h: '♥', d: '♦', c: '♣' }
+const SUIT_NAME = { s: 'spades', h: 'hearts', d: 'diamonds', c: 'clubs' }
 
-function PlayingCard({ card = null, faceDown = false }) {
-  if (faceDown || !card) return <div className="pk-card face-down" role="img" aria-label="Face-down playing card" />
-  const [rank, suit] = card
+// A playing card. The same element serves as a face-down back, a face-up face and
+// the flip between them (3D rotate), so a reveal is one class change rather than a swap.
+function PlayingCard({ card = null, faceDown = false, dim = false, win = false, deal = null, className = '' }) {
+  const down = faceDown || !card
+  const [rank, suit] = card || ['', '']
   const red = suit === 'h' || suit === 'd'
+  const label = down ? 'Face-down playing card' : `${rank === 'T' ? '10' : rank} of ${SUIT_NAME[suit] || suit}`
   return (
-    <div className={`pk-card ${red ? 'red' : 'black'}`} role="img" aria-label={`${rank} of ${suit}`}>
-      <span className="pk-card-rank">{rank}</span>
-      <span className="pk-card-suit">{SUIT_SYMBOL[suit] || suit}</span>
+    <div
+      className={`pk-card3d ${down ? 'is-down' : ''} ${dim ? 'is-dim' : ''} ${win ? 'is-win' : ''} ${deal != null ? 'is-dealt' : ''} ${className}`}
+      style={deal != null ? /** @type {any} */ ({ '--deal': `${deal}s` }) : undefined}
+      role="img" aria-label={label}
+    >
+      <div className={`pk-face pk-front ${red ? 'red' : 'black'}`}>
+        <span className="pk-corner"><b>{rank === 'T' ? '10' : rank}</b><i>{SUIT_SYMBOL[suit] || ''}</i></span>
+        <span className="pk-pip">{SUIT_SYMBOL[suit] || ''}</span>
+      </div>
+      <div className="pk-face pk-back"><span>C</span></div>
+    </div>
+  )
+}
+
+// One player's place at the table: hole cards, name plate (stack, dealer button,
+// status) and the chips they have in front of them this street.
+function PokerSeat({ side, name, stack, bet = 0, isTurn = false, isDealer = false, badge = '', winner = false, folded = false, you = false, children }) {
+  return (
+    <div className={`pk-seat ${side} ${isTurn ? 'is-turn' : ''} ${winner ? 'is-winner' : ''} ${folded ? 'is-folded' : ''}`}>
+      {bet > 0 && <div className="pk-bet" aria-label={`Bet ${cnpy(bet)} CNPY`}><i className="pk-chip" /><span>{cnpy(bet)}</span></div>}
+      <div className="pk-cards">{children}</div>
+      <div className="pk-plate">
+        <span className="pk-avatar" aria-hidden="true">{you ? 'Y' : 'O'}</span>
+        <span className="pk-plate-text"><b>{name}</b><small>{stack}</small></span>
+        {isDealer && <span className="pk-dealer" title="Dealer · small blind">D</span>}
+        {badge && <span className="pk-badge">{badge}</span>}
+      </div>
     </div>
   )
 }
@@ -1154,7 +1189,7 @@ function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () =
               <div className={`result-card ${won ? 'is-win' : ''}`}>
                 <span className="cx-eyebrow">ROUND RESULT</span>
                 <strong>{won ? 'You won' : 'No luck this spin'}</strong>
-                {won && <span className="rw-win-amount">+{cnpy(shownPayout)} <small>CNPY</small></span>}
+                {won && <span className="rw-win-amount">+{cnpyShort(shownPayout)} <small>CNPY</small></span>}
                 <p>
                   {spinResult.spin} {spinResult.color} · {won
                     ? 'Paid out on-chain, net of rake.'
@@ -1659,7 +1694,14 @@ function DominoRoom({ account, onConnect }) {
   )
 }
 
-function PokerRoom({ account, onConnect }) {
+const POKER_EMPTY_TABLE = {
+  turn: null, street: null, board: [], pot: 0,
+  streetContributed: [0, 0], stacks: [0, 0], folded: [false, false], allIn: [false, false], finished: false,
+}
+const trimTokens = (raw) => formatTokens(raw).replace(/\.?0+$/, '')
+const cardKey = (card) => `${card[0]}${card[1]}`
+
+function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [mode, setMode] = useState('lobby') // lobby -> waiting -> playing -> settled
   const [roundId, setRoundId] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
@@ -1667,10 +1709,8 @@ function PokerRoom({ account, onConnect }) {
   const [, setPlayers] = useState([])
   const [botAddress, setBotAddress] = useState(null)
   const [myHole, setMyHole] = useState([])
-  const [table, setTable] = useState({
-    turn: null, street: null, board: [], pot: 0,
-    streetContributed: [0, 0], stacks: [0, 0], folded: [false, false], allIn: [false, false], finished: false,
-  })
+  const [table, setTable] = useState(POKER_EMPTY_TABLE)
+  const [showStep, setShowStep] = useState(0) // 0 hand ending -> 1 cards turn over -> 2 result announced
   const [joinInput, setJoinInput] = useState('')
   const [phase, setPhase] = useState('idle')
   const [error, setError] = useState('')
@@ -1771,7 +1811,9 @@ function PokerRoom({ account, onConnect }) {
       }
     })()
     return () => { cancelled = true; botBusy.current = false }
-  }, [mode, roundId, botAddress, table.turn, table.finished, mySeat])
+  // The bot can act twice in a row (e.g. big blind opens every postflop street), so the turn
+  // index alone doesn't change; the street and pot do.
+  }, [mode, roundId, botAddress, table.turn, table.street, table.pot, table.finished, mySeat])
 
   useEffect(() => {
     if ((mode !== 'playing' && mode !== 'settled') || !roundId) return undefined
@@ -1940,12 +1982,71 @@ function PokerRoom({ account, onConnect }) {
   }
 
   const oppSeat = mySeat === 0 ? 1 : 0
+  const seat = mySeat ?? 0
   const myTurn = mode === 'playing' && table.turn === mySeat
   const maxStreetContributed = Math.max(...table.streetContributed)
   const toCall = mySeat != null ? Math.max(0, maxStreetContributed - (table.streetContributed[mySeat] || 0)) : 0
-  const suggestedRaiseTo = roundInfo ? (maxStreetContributed + roundInfo.bigBlind) / 1_000_000 : ''
+  const bigBlind = roundInfo?.bigBlind || 0
+  const myStack = table.stacks[seat] || 0
+  const maxRaiseTo = (table.streetContributed[seat] || 0) + myStack
+  const minRaiseTo = Math.min(maxRaiseTo, maxStreetContributed + bigBlind)
+  const canRaise = maxRaiseTo > maxStreetContributed && !table.allIn[oppSeat]
+  const potAfterCall = table.pot + toCall
+  const sizePresets = [
+    { id: 'min', label: 'Min', to: minRaiseTo },
+    { id: 'half', label: '½ pot', to: maxStreetContributed + Math.floor(potAfterCall / 2) },
+    { id: 'pot', label: 'Pot', to: maxStreetContributed + potAfterCall },
+    { id: 'allin', label: 'All-in', to: maxRaiseTo },
+  ].map((preset) => ({ ...preset, to: Math.max(minRaiseTo, Math.min(maxRaiseTo, preset.to)) }))
+  const raiseNow = (() => { try { return parseTokens(raiseAmount) } catch { return NaN } })()
+
+  // After the hand: both players' cards come with the proof; work out who played what.
+  const holes = proof?.hole || null
+  const showdown = mode === 'settled' && proof?.reason === 'showdown' && holes && proof?.board?.length === 5
+  const hands = useMemo(
+    () => (showdown ? holes.map((hole) => bestHand([...hole, ...proof.board])) : null),
+    [showdown, holes, proof?.board],
+  )
+  const winnerSeats = useMemo(() => {
+    if (Array.isArray(proof?.winners)) return proof.winners
+    const mine = (account?.address || '').toLowerCase()
+    return (result?.winners || []).map((addr) => (String(addr).toLowerCase() === mine ? mySeat : 1 - (mySeat ?? 0)))
+  }, [proof?.winners, result?.winners, account?.address, mySeat])
+  const handOver = mode === 'settled' && showStep >= 2
+  const iWon = handOver && winnerSeats.includes(mySeat) && winnerSeats.length === 1
+  const split = handOver && winnerSeats.length > 1
   const myPayout = result && account ? result.payouts?.[account.address] : null
-  const won = myPayout != null && myPayout > 0
+  const myNet = myPayout != null && roundInfo ? myPayout - roundInfo.buyIn : null
+  const won = iWon && (myNet == null || myNet > 0)
+  const shownNet = useCountUp(myNet != null && myNet > 0 ? myNet : 0, won && myNet != null)
+  const playingCards = useMemo(() => {
+    if (!handOver || !hands) return null
+    return new Set(winnerSeats.flatMap((w) => hands[w].cards.map(cardKey)))
+  }, [handOver, hands, winnerSeats])
+  const foldedEnd = mode === 'settled' && (proof?.reason ?? result?.reason) === 'fold'
+  // The engine's stacks exclude the pot; once the hand is over the winner's plate shows it awarded.
+  const stackOf = (i) => (table.stacks[i] || 0) + (handOver && winnerSeats.includes(i) ? Math.floor(table.pot / winnerSeats.length) : 0)
+
+  // Stage the ending: hand finishes -> cards turn over -> result announced.
+  useEffect(() => {
+    if (mode !== 'settled') { setShowStep(0); return undefined }
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { setShowStep(2); return undefined }
+    const t1 = window.setTimeout(() => setShowStep((v) => Math.max(v, 1)), foldedEnd ? 0 : 700)
+    const t2 = window.setTimeout(() => setShowStep(2), foldedEnd ? 600 : 2200)
+    return () => { window.clearTimeout(t1); window.clearTimeout(t2) }
+  }, [mode, foldedEnd])
+
+  // Header balance follows the table: after the buy-in leaves and after the payout lands.
+  const refreshRef = useRef(refreshBalance)
+  refreshRef.current = refreshBalance
+  useEffect(() => { if (phase === 'confirmed' || handOver) refreshRef.current() }, [phase, handOver])
+
+  function resetTable() {
+    socketRef.current?.close()
+    setMode('lobby'); setRoundId(null); setRoundInfo(null); setMySeat(null); setPlayers([]); setBotAddress(null)
+    setMyHole([]); setTable(POKER_EMPTY_TABLE); setPhase('idle'); setError(''); setTxHash('')
+    setRaiseAmount(''); setResult(null); setProof(null); setShowStep(0); setJoinInput('')
+  }
 
   return (
     <section className="cx-live-room pk-room" id="rooms">
@@ -1955,7 +2056,7 @@ function PokerRoom({ account, onConnect }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={false} /> POKER · READ-ONLY PREVIEW</span>
+            <span className="cx-eyebrow"><StatusDot online={!WAGERING_PAUSED} /> POKER · {WAGERING_PAUSED ? 'READ-ONLY PREVIEW' : 'LIVE TABLE'}</span>
             <h1>Heads-up <em>No-Limit.</em></h1>
             <p>The operator commits to a hidden seed before the table opens; the plugin only ever trusts a betting-action log it can replay and verify itself, all the way to the showdown.</p>
           </div>
@@ -1982,67 +2083,140 @@ function PokerRoom({ account, onConnect }) {
 
         {mode !== 'lobby' && (
           <div className="cx-room-layout pk-layout">
-            <div className="cx-game-stage pk-stage">
-              <div className="pk-opponent-row">
-                <span className="cx-eyebrow">OPPONENT{table.folded[oppSeat] ? ' · FOLDED' : table.allIn[oppSeat] ? ' · ALL-IN' : ''}</span>
-                <div className="pk-hand">
-                  {mode === 'waiting'
-                    ? (
-                      <div className="dm-waiting-copy">
-                        <p>Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
-                        {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
-                          <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
-                        )}
-                        {botAddress && <p>Practice opponent seated — dealing…</p>}
-                      </div>
+            <div className={`cx-game-stage pk-stage ${won ? 'is-win' : ''}`}>
+              {won && <WinMotes />}
+              <div className={`pk-table ${mode === 'settled' ? 'is-settled' : ''}`}>
+                <div className="pk-rail" aria-hidden="true" />
+
+                <PokerSeat
+                  side="top" name="Opponent" you={false}
+                  stack={mode === 'waiting' ? 'Seat open' : `${cnpy(stackOf(oppSeat))} CNPY`}
+                  bet={mode === 'playing' ? table.streetContributed[oppSeat] : 0}
+                  isTurn={mode === 'playing' && table.turn === oppSeat}
+                  isDealer={mode !== 'waiting' && oppSeat === 0}
+                  folded={table.folded[oppSeat]}
+                  winner={handOver && winnerSeats.includes(oppSeat)}
+                  badge={handOver && hands && winnerSeats.includes(oppSeat) ? hands[oppSeat].name
+                    : table.folded[oppSeat] ? 'Folded' : table.allIn[oppSeat] ? 'All-in' : ''}
+                >
+                  {mode === 'waiting' ? (
+                    <><span className="pk-slot" /><span className="pk-slot" /></>
+                  ) : [0, 1].map((i) => {
+                    const revealed = showdown && showStep >= 1 && holes?.[oppSeat]?.[i]
+                    const card = revealed ? holes[oppSeat][i] : null
+                    return (
+                      <PlayingCard key={i} card={card} faceDown={!revealed} deal={0.05 + i * 0.12}
+                        dim={Boolean(playingCards && card && !playingCards.has(cardKey(card)))}
+                        win={Boolean(playingCards && card && playingCards.has(cardKey(card)))} />
                     )
-                    : <><PlayingCard faceDown /><PlayingCard faceDown /></>}
-                </div>
-                {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[oppSeat])} CNPY</strong>}
-              </div>
+                  })}
+                </PokerSeat>
 
-              <div className="pk-board">
-                <span className="pk-street-label">{mode === 'settled' ? 'SHOWDOWN' : (table.street || 'PREFLOP').toUpperCase()}</span>
-                <div className="pk-board-cards">
-                  {Array.from({ length: 5 }).map((_, index) => (
-                    <PlayingCard key={index} card={table.board[index]} faceDown={!table.board[index]} />
+                <div className="pk-center">
+                  {mode === 'waiting' ? (
+                    <div className="pk-waiting">
+                      <span className="pk-street">WAITING FOR AN OPPONENT</span>
+                      <p>Share this table ID: <code>{roundId}</code></p>
+                      {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
+                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                      )}
+                      {botAddress && <p className="pk-dealing">Practice opponent seated — dealing…</p>}
+                    </div>
+                  ) : (
+                    <>
+                      <span className="pk-street">{mode === 'settled' ? (showdown ? 'SHOWDOWN' : 'HAND COMPLETE') : (table.street || 'preflop').toUpperCase()}</span>
+                      <div className="pk-board-cards">
+                        {Array.from({ length: 5 }).map((_, index) => {
+                          const card = table.board[index]
+                          if (!card) return <span className="pk-slot" key={`slot-${index}`} />
+                          return (
+                            <PlayingCard key={cardKey(card)} card={card} deal={(index < 3 ? index : 0) * 0.14}
+                              dim={Boolean(playingCards && !playingCards.has(cardKey(card)))}
+                              win={Boolean(playingCards && playingCards.has(cardKey(card)))} />
+                          )
+                        })}
+                      </div>
+                      <div className="pk-pot"><i className="pk-chip" /><span>{handOver ? 'Awarded' : 'Pot'}</span><strong>{cnpy(table.pot)}</strong><small>CNPY</small></div>
+                    </>
+                  )}
+                </div>
+
+                <PokerSeat
+                  side="bottom" name="You" you
+                  stack={mode === 'waiting' ? `${cnpy(roundInfo?.buyIn || 0)} CNPY` : `${cnpy(stackOf(seat))} CNPY`}
+                  bet={mode === 'playing' ? table.streetContributed[seat] : 0}
+                  isTurn={myTurn} isDealer={mode !== 'waiting' && seat === 0}
+                  folded={table.folded[seat]}
+                  winner={handOver && winnerSeats.includes(seat)}
+                  badge={handOver && hands && winnerSeats.includes(seat) ? hands[seat].name
+                    : table.folded[seat] ? 'Folded' : table.allIn[seat] ? 'All-in' : ''}
+                >
+                  {(myHole.length ? myHole : holes?.[seat] || []).map((card, index) => (
+                    <PlayingCard key={cardKey(card)} card={card} deal={0.25 + index * 0.14}
+                      dim={Boolean(playingCards && !playingCards.has(cardKey(card)))}
+                      win={Boolean(playingCards && playingCards.has(cardKey(card)))} />
                   ))}
-                </div>
-                <strong className="pk-pot">Pot · {cnpy(table.pot)} CNPY</strong>
-                {mode === 'playing' && <p className="dm-turn-copy">{myTurn ? 'Your turn' : "Opponent's turn"}</p>}
+                  {!myHole.length && !holes?.[seat] && <><span className="pk-slot" /><span className="pk-slot" /></>}
+                </PokerSeat>
               </div>
 
-              <div className="pk-hand-row">
-                <span className="cx-eyebrow">YOUR HAND</span>
-                <div className="pk-hand">
-                  {myHole.map((card, index) => <PlayingCard key={index} card={card} />)}
+              {mode === 'playing' && (
+                <div className="pk-actionbar">
+                  {myTurn && !table.finished ? (
+                    <>
+                      <div className="pk-actions-main">
+                        <button className="pk-action-fold" onClick={() => submitAction('fold')}>Fold</button>
+                        <button className="pk-action-call" onClick={() => submitAction('check_call')}>
+                          {toCall > 0 ? <>Call <b>{cnpy(toCall)}</b></> : 'Check'}
+                        </button>
+                      </div>
+                      {canRaise && (
+                        <form className="pk-sizing" onSubmit={handleRaiseSubmit}>
+                          <div className="pk-presets" role="group" aria-label="Bet size">
+                            {sizePresets.map((preset) => (
+                              <button type="button" key={preset.id} className={raiseNow === preset.to ? 'is-active' : ''}
+                                onClick={() => setRaiseAmount(trimTokens(preset.to))}>{preset.label}</button>
+                            ))}
+                          </div>
+                          <input type="range" aria-label="Bet size slider" className="pk-slider"
+                            min={minRaiseTo} max={maxRaiseTo} step={Math.max(1, roundInfo?.smallBlind || 1)}
+                            value={Number.isFinite(raiseNow) && raiseNow >= minRaiseTo ? Math.min(raiseNow, maxRaiseTo) : minRaiseTo}
+                            onChange={(event) => setRaiseAmount(trimTokens(Number(event.target.value)))} />
+                          <div className="pk-raise-form">
+                            <input aria-label="Raise total in CNPY" type="number" min="0" step="0.000001"
+                              placeholder={trimTokens(minRaiseTo)} value={raiseAmount} onChange={(event) => setRaiseAmount(event.target.value)} />
+                            <button type="submit" className="pk-action-raise">{toCall > 0 ? 'Raise to' : 'Bet'}</button>
+                          </div>
+                        </form>
+                      )}
+                    </>
+                  ) : (
+                    <p className="pk-wait">{table.finished ? 'Settling the hand…' : "Opponent is thinking…"}</p>
+                  )}
                 </div>
-                {mode !== 'waiting' && <strong className="pk-stack">{cnpy(table.stacks[mySeat])} CNPY</strong>}
-                {myTurn && !table.finished && (
-                  <div className="pk-actions">
-                    <button className="pk-action-fold" onClick={() => submitAction('fold')}>Fold</button>
-                    <button className="pk-action-call" onClick={() => submitAction('check_call')}>
-                      {toCall > 0 ? `Call ${cnpy(toCall)}` : 'Check'}
-                    </button>
-                    <form className="pk-raise-form" onSubmit={handleRaiseSubmit}>
-                      <input aria-label="Raise total in CNPY"
-                        type="number" min="0" step="0.000001" placeholder={String(suggestedRaiseTo)}
-                        value={raiseAmount} onChange={(event) => setRaiseAmount(event.target.value)}
-                      />
-                      <button type="submit" className="pk-action-raise">{toCall > 0 ? 'Raise to' : 'Bet'}</button>
-                    </form>
-                  </div>
-                )}
-              </div>
+              )}
+
+              {handOver && (
+                <div className={`pk-outcome ${won ? 'is-win' : ''}`} role="status">
+                  <strong>
+                    {split ? 'Split pot'
+                      : foldedEnd ? (iWon ? 'Opponent folded — the pot is yours' : 'You folded')
+                      : iWon ? <>You win with {hands?.[seat]?.name}</>
+                      : <>Opponent wins with {hands?.[oppSeat]?.name}</>}
+                  </strong>
+                  <button className="cx-gold-button" onClick={resetTable}><span>New table</span><b>→</b></button>
+                </div>
+              )}
             </div>
 
             <div className="round-side pk-side">
               <TxStatus phase={phase} error={error} txHash={txHash} />
-              {mode === 'settled' && result && (
+              {handOver && result && (
                 <div className={`result-card ${won ? 'is-win' : ''}`}>
                   <span className="cx-eyebrow">HAND RESULT</span>
-                  <strong>{won ? 'You won' : 'No luck this hand'}</strong>
-                  <p>{result.reason === 'fold' ? 'Opponent folded' : 'Showdown'} · {won ? `+${cnpy(myPayout)} CNPY net of rake.` : 'Better cards next hand.'}</p>
+                  <strong>{won ? 'You won' : split ? 'Split pot' : 'No luck this hand'}</strong>
+                  {won && myNet != null && <span className="rw-win-amount">+{cnpyShort(shownNet)} <small>CNPY</small></span>}
+                  <p>{foldedEnd ? 'Decided by a fold' : 'Showdown'} · {won ? 'Profit after rake, paid on-chain.' : 'Better cards next hand.'}</p>
                 </div>
               )}
             </div>
@@ -2385,7 +2559,7 @@ export default function Experience() {
           ) : view === 'domino' ? (
             <DominoRoom key={account?.address || 'guest'} account={account} onConnect={connect} />
           ) : view === 'poker' ? (
-            <PokerRoom key={account?.address || 'guest'} account={account} onConnect={connect} />
+            <PokerRoom key={account?.address || 'guest'} account={account} onConnect={connect} refreshBalance={refreshBalance} />
           ) : (
             <>
               <Home onPlay={play} />
