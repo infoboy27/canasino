@@ -41,3 +41,20 @@ export async function readPrivate(path, roundId, address, read, extra = {}) {
   if (auth) return jsonSessionGet(path, auth.sessionId, auth.mac)
   return jsonGet(path, { operator: true })
 }
+
+/**
+ * Register a chain tx with the game service, waiting while the tx is not indexed
+ * yet (425). Retries reuse the same operation id and grant (see auth.js), so
+ * waiting costs no extra wallet prompt. Any other error is final.
+ */
+export async function registerPatiently(register, { attempts = 20, delayMs = 3000, firstDelayMs = 3500 } = {}) {
+  await new Promise((resolve) => setTimeout(resolve, firstDelayMs))
+  for (let i = 1; ; i++) {
+    try {
+      return await register()
+    } catch (error) {
+      if (error?.status !== 425 || i >= attempts) throw error
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, jsonGet, PRACTICE_OPPONENT } from './lib/api.js'
-import { getCapabilities, seatHouseRival } from './lib/lobby.js'
+import { getCapabilities, registerPatiently, seatHouseRival } from './lib/lobby.js'
 import { openMoveSession } from './lib/session.js'
 import { bestHand } from './lib/pokerEval.js'
 import { CENTER, LETTERS, cardProgress, columnNumbers, flattenCard } from './lib/bingoLines.js'
@@ -667,6 +667,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
   const [roundInfo, setRoundInfo] = useState(null)
   const [phase, setPhase] = useState('idle')
   const [opening, setOpening] = useState(false)
+  const sentJoinRef = useRef(null) // { roundId, hash }: entry tx already on its way for this round
   const [error, setError] = useState('')
   const [txHash, setTxHash] = useState('')
   const [cards, setCards] = useState([])
@@ -864,30 +865,32 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
     }
 
     try {
-      await assertCanAfford(account.address, amount + 10000, 'this room')
-      setPhase('awaiting-signature')
-      const signed = await joinBingoRound({
-        roundId: round.roundId,
-        numCards,
-        amount,
-        rpcUrl: roundInfo.rpcUrl,
-        chainId: roundInfo.chainId,
-        networkId: roundInfo.networkId,
-      })
-      const hash = signed?.txHash || ''
-      setTxHash(hash)
-      setPhase('submitted')
-
-      // The join tx needs a block to be indexed and reach finality before the
-      // server can verify it; give it a moment, then retry once on 425.
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerRound(round.roundId, account.address, numCards, hash)
-      } catch (registerErr) {
-        if (registerErr?.status !== 425) throw registerErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerRound(round.roundId, account.address, numCards, hash)
+      let hash
+      if (sentJoinRef.current?.roundId === round.roundId) {
+        // The entry tx was already sent; only its registration is missing.
+        // Sending another would fail on-chain ("player already joined").
+        hash = sentJoinRef.current.hash
+        setPhase('submitted')
+      } else {
+        await assertCanAfford(account.address, amount + 10000, 'this room')
+        setPhase('awaiting-signature')
+        const signed = await joinBingoRound({
+          roundId: round.roundId,
+          numCards,
+          amount,
+          rpcUrl: roundInfo.rpcUrl,
+          chainId: roundInfo.chainId,
+          networkId: roundInfo.networkId,
+        })
+        hash = signed?.txHash || ''
+        sentJoinRef.current = { roundId: round.roundId, hash }
+        setTxHash(hash)
+        setPhase('submitted')
       }
+
+      // The join tx needs a block to be indexed before the server can verify it;
+      // registerPatiently waits and retries while it is still pending (425).
+      await registerPatiently(() => registerRound(round.roundId, account.address, numCards, hash))
       // One signature lets this player read their own card for this room.
       await openMoveSession('bingo', round.roundId, account)
       setPhase('confirmed')
@@ -1201,14 +1204,7 @@ function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () =
       setPhase('submitted')
       // The bet tx needs a block to be indexed before the server can verify
       // it; give it a moment, then retry once on 425.
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
-      } catch (registerErr) {
-        if (registerErr?.status !== 425) throw registerErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
-      }
+      await registerPatiently(() => registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash))
       setMyBet({ ...selectedBet, amount })
       setPhase('confirmed')
     } catch (err) {
@@ -1573,14 +1569,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerDominoJoin(rid, account.address, signed?.txHash)
-      } catch (regErr) {
-        if (regErr?.status !== 425) throw regErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerDominoJoin(rid, account.address, signed?.txHash)
-      }
+      await registerPatiently(() => registerDominoJoin(rid, account.address, signed?.txHash))
       // One signature now authorizes every move at this table; if it's
       // declined, moves fall back to signing individually.
       await openMoveSession('domino', rid, account)
@@ -2077,14 +2066,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerPokerJoin(rid, account.address, signed?.txHash)
-      } catch (regErr) {
-        if (regErr?.status !== 425) throw regErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerPokerJoin(rid, account.address, signed?.txHash)
-      }
+      await registerPatiently(() => registerPokerJoin(rid, account.address, signed?.txHash))
       // One signature now authorizes every action at this table; if it's
       // declined, actions fall back to signing individually.
       await openMoveSession('poker', rid, account)
