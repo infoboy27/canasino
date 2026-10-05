@@ -1071,6 +1071,8 @@ const ROULETTE_AUTO_RESPIN_MS = 7_000
 // Time for the disc + ball animation to land before the result is revealed in text.
 const ROULETTE_REVEAL_MS = 5_000
 
+const BET_CUTOFF_SECONDS = 12
+
 function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () => {} }) {
   const [roundId, setRoundId] = useState(null)
   const [, setRoundMeta] = useState(null)
@@ -1167,7 +1169,8 @@ function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () =
     return () => { ws?.close(); socketRef.current = null }
   }, [roundId])
 
-  const betsOpen = phase !== 'idle' && spinPhase === 'waiting' && (secondsLeft == null || secondsLeft > 0)
+  // A bet is a chain tx (~10 s); one signed in the last seconds lands after the server closes the window.
+  const betsOpen = phase !== 'idle' && spinPhase === 'waiting' && (secondsLeft == null || secondsLeft > BET_CUTOFF_SECONDS)
   const minBetWhole = roundInfo?.minBet ? roundInfo.minBet / 1_000_000 : 0
   const maxBetWhole = roundInfo?.maxBet ? roundInfo.maxBet / 1_000_000 : 0
 
