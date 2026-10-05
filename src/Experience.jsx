@@ -470,19 +470,75 @@ function DominoPips({ value }) {
   )
 }
 
-function DominoTile({ tile = null, faceDown = false, orientation = 'horizontal', selected = false, disabled = false, onClick = () => {} }) {
-  if (faceDown) return <div className={`dm-tile face-down ${orientation}`} />
+// A bone tile: two halves split by a groove with a brass pin. Size comes from --tw so the
+// hand, the chain and the opponent's row can each scale it. A button when clickable.
+function DominoTile({ tile = null, faceDown = false, orientation = 'vertical', selected = false, playable = false,
+  disabled = false, dim = false, fresh = false, deal = null, onClick = null }) {
+  const cls = `dm-tile ${orientation} ${faceDown ? 'face-down' : ''} ${selected ? 'selected' : ''} ${playable ? 'is-playable' : ''} ${dim ? 'is-dim' : ''} ${fresh ? 'is-fresh' : ''} ${deal != null ? 'is-dealt' : ''}`
+  const style = deal != null ? /** @type {any} */ ({ '--deal': `${deal}s` }) : undefined
+  if (faceDown || !tile) return <div className={cls} style={style} role="img" aria-label="Face-down domino"><span className="dm-back-mark">C</span></div>
   const [low, high] = tile
+  const body = <><div className="dm-half"><DominoPips value={low} /></div><i className="dm-groove" /><b className="dm-pin" /><div className="dm-half"><DominoPips value={high} /></div></>
+  if (!onClick) return <div className={cls} style={style} role="img" aria-label={`Domino ${low} and ${high}`}>{body}</div>
   return (
-    <button
-      type="button"
-      className={`dm-tile ${orientation} ${selected ? 'selected' : ''}`}
-      aria-label={`Domino ${low} and ${high}`}
-      aria-pressed={Boolean(selected)}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      <DominoPips value={low} /><i /><DominoPips value={high} />
+    <button type="button" className={cls} style={style} aria-label={`Domino ${low} and ${high}`} aria-pressed={Boolean(selected)} disabled={disabled} onClick={onClick}>
+      {body}
+    </button>
+  )
+}
+
+// The open end of the chain. It doubles as the drop target when a tile fits on both sides.
+function DominoEnd({ value, side, target = false, onPick = () => {} }) {
+  return (
+    <button type="button" className={`dm-end ${target ? 'is-target' : ''}`} disabled={!target} onClick={onPick}
+      aria-label={target ? `Play on the ${side} end (${value})` : `${side} end shows ${value}`}>
+      {value ?? '·'}
+    </button>
+  )
+}
+
+// Keeps the whole chain visible: it shrinks (down to a floor) instead of scrolling away.
+function DominoChain({ tiles, ends, targets = [], onPick }) {
+  const wrap = useRef(null)
+  const line = useRef(null)
+  const [scale, setScale] = useState(1)
+  useEffect(() => {
+    const fit = () => {
+      if (!wrap.current || !line.current) return
+      const avail = wrap.current.clientWidth - 16
+      const need = line.current.scrollWidth
+      setScale(need > avail ? Math.max(0.42, avail / need) : 1)
+    }
+    fit()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver(fit)
+    if (wrap.current) ro.observe(wrap.current)
+    if (line.current) ro.observe(line.current)
+    return () => ro.disconnect()
+  }, [tiles.length])
+  return (
+    <div className="dm-chain-wrap" ref={wrap}>
+      <div className="dm-chain" ref={line} style={{ transform: `scale(${scale})` }}>
+        {ends != null && <DominoEnd side="left" value={ends[0]} target={targets.includes('left')} onPick={() => onPick('left')} />}
+        <div className="dm-chain-tiles">
+          {tiles.map(({ id, tile }, index) => (
+            <DominoTile key={id} tile={tile} orientation={tile[0] === tile[1] ? 'vertical' : 'horizontal'} fresh={index === tiles.length - 1} />
+          ))}
+        </div>
+        {ends != null && <DominoEnd side="right" value={ends[1]} target={targets.includes('right')} onPick={() => onPick('right')} />}
+      </div>
+    </div>
+  )
+}
+
+// The stock: shows how many tiles are left, and becomes the draw button when you have no play.
+function Boneyard({ count, canDraw, canPass, onDraw }) {
+  const active = canDraw || canPass
+  return (
+    <button type="button" className={`dm-boneyard ${active ? 'is-active' : ''}`} disabled={!active} onClick={onDraw}
+      aria-label={canDraw ? `Draw a tile (${count} left)` : canPass ? 'Pass' : `${count ?? '—'} tiles in the boneyard`}>
+      <span className="dm-stack" aria-hidden="true"><i /><i /><i /></span>
+      <span className="dm-boneyard-text"><b>{count ?? '—'}</b><small>{canDraw ? 'Draw' : canPass ? 'Pass' : 'Boneyard'}</small></span>
     </button>
   )
 }
@@ -514,9 +570,9 @@ function PlayingCard({ card = null, faceDown = false, dim = false, win = false, 
 
 // One player's place at the table: hole cards, name plate (stack, dealer button,
 // status) and the chips they have in front of them this street.
-function PokerSeat({ side, name, stack, bet = 0, isTurn = false, isDealer = false, badge = '', winner = false, folded = false, you = false, children }) {
+function TableSeat({ side, name, stack, bet = 0, isTurn = false, isDealer = false, badge = '', winner = false, folded = false, you = false, className = '', children }) {
   return (
-    <div className={`pk-seat ${side} ${isTurn ? 'is-turn' : ''} ${winner ? 'is-winner' : ''} ${folded ? 'is-folded' : ''}`}>
+    <div className={`pk-seat ${side} ${className} ${isTurn ? 'is-turn' : ''} ${winner ? 'is-winner' : ''} ${folded ? 'is-folded' : ''}`}>
       {bet > 0 && <div className="pk-bet" aria-label={`Bet ${cnpy(bet)} CNPY`}><i className="pk-chip" /><span>{cnpy(bet)}</span></div>}
       <div className="pk-cards">{children}</div>
       <div className="pk-plate">
@@ -1219,26 +1275,29 @@ function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () =
 // numbers read continuously along the chain.
 function reconstructDominoBoard(moves) {
   const tiles = []
+  let n = 0
   let left = null
   let right = null
   for (const move of moves || []) {
     if (move.action !== 'play' || !Array.isArray(move.tile)) continue
     const [a, b] = move.tile
     if (tiles.length === 0) {
-      tiles.push([a, b])
+      tiles.push({ id: `m${n}`, tile: [a, b] })
       left = a
       right = b
+      n += 1
       continue
     }
     if (move.end === 'left') {
       const outer = a === left ? b : a
-      tiles.unshift([outer, left])
+      tiles.unshift({ id: `m${n}`, tile: [outer, left] })
       left = outer
     } else {
       const outer = a === right ? b : a
-      tiles.push([right, outer])
+      tiles.push({ id: `m${n}`, tile: [right, outer] })
       right = outer
     }
+    n += 1
   }
   return tiles
 }
@@ -1253,7 +1312,7 @@ function legalDominoEnds(tile, ends) {
   return outs
 }
 
-function DominoRoom({ account, onConnect }) {
+function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [mode, setMode] = useState('lobby') // lobby -> waiting -> playing -> settled
   const [roundId, setRoundId] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
@@ -1265,6 +1324,8 @@ function DominoRoom({ account, onConnect }) {
   const [boardTiles, setBoardTiles] = useState([])
   const [turn, setTurn] = useState(null)
   const [boneyardRemaining, setBoneyardRemaining] = useState(null)
+  const [handSizes, setHandSizes] = useState([7, 7])
+  const [showStep, setShowStep] = useState(0) // 0 last tile just landed -> 1 result announced
   const [joinInput, setJoinInput] = useState('')
   const [phase, setPhase] = useState('idle')
   const [error, setError] = useState('')
@@ -1296,6 +1357,7 @@ function DominoRoom({ account, onConnect }) {
         if (status.turn != null) setTurn(status.turn)
         if (status.ends !== undefined) setEnds(status.ends ?? null)
         if (status.boneyardRemaining != null) setBoneyardRemaining(status.boneyardRemaining)
+        if (Array.isArray(status.handSizes)) setHandSizes(status.handSizes)
         if (Array.isArray(status.moves)) setBoardTiles(reconstructDominoBoard(status.moves))
         if (status.status === 'settled') {
           // submitMove / the bot effect carry the rich settle result (address
@@ -1398,7 +1460,10 @@ function DominoRoom({ account, onConnect }) {
             setTurn(msg.nextTurn)
             setEnds(msg.endsAfter)
             getDominoRound(roundId)
-              .then((s) => Array.isArray(s.moves) && setBoardTiles(reconstructDominoBoard(s.moves)))
+              .then((s) => {
+                if (Array.isArray(s.moves)) setBoardTiles(reconstructDominoBoard(s.moves))
+                if (Array.isArray(s.handSizes)) setHandSizes(s.handSizes)
+              })
               .catch(() => null)
           }
           if (msg.type === 'settled') {
@@ -1537,6 +1602,8 @@ function DominoRoom({ account, onConnect }) {
         if (s.turn != null) setTurn(s.turn)
         setEnds(s.ends ?? null)
         if (s.boneyardRemaining != null) setBoneyardRemaining(s.boneyardRemaining)
+        if (Array.isArray(s.handSizes)) setHandSizes(s.handSizes)
+        if (Array.isArray(s.moves)) setBoardTiles(reconstructDominoBoard(s.moves))
       }).catch(() => null)
       if (resp.settled) {
         setMode('settled')
@@ -1559,11 +1626,47 @@ function DominoRoom({ account, onConnect }) {
     }
   }
 
+  const oppSeat = mySeat === 0 ? 1 : 0
+  const seat = mySeat ?? 0
   const myTurn = mode === 'playing' && turn === mySeat
   const hasLegalPlay = myHand.some((t) => legalDominoEnds(t, ends).length > 0)
-  const opponentHandSize = 7 // face-down count is cosmetic; exact remaining count isn't exposed pre-settle
+  const canDraw = myTurn && !hasLegalPlay && (boneyardRemaining ?? 0) > 0
+  const canPass = myTurn && !hasLegalPlay && boneyardRemaining === 0
+  const endTargets = selectedTile ? legalDominoEnds(selectedTile, ends).filter((e) => e !== 'none') : []
+  const winnerSeats = useMemo(() => {
+    if (Array.isArray(proof?.winners)) return proof.winners
+    const mine = (account?.address || '').toLowerCase()
+    return (result?.winners || []).map((addr) => (String(addr).toLowerCase() === mine ? mySeat : 1 - (mySeat ?? 0)))
+  }, [proof?.winners, result?.winners, account?.address, mySeat])
+  const handOver = mode === 'settled' && showStep >= 1
+  const iWon = handOver && winnerSeats.includes(seat) && winnerSeats.length === 1
+  const split = handOver && winnerSeats.length > 1
+  const emptied = (proof?.reason ?? result?.reason) === 'emptied_hand'
   const myPayout = result && account ? result.payouts?.[account.address] : null
-  const won = myPayout != null && myPayout > 0
+  const myNet = myPayout != null && roundInfo ? myPayout - roundInfo.entryFee : null
+  const won = iWon && (myNet == null || myNet > 0)
+  const shownNet = useCountUp(myNet != null && myNet > 0 ? myNet : 0, won && myNet != null)
+
+  // Brief beat between the last tile and the announcement.
+  useEffect(() => {
+    if (mode !== 'settled') { setShowStep(0); return undefined }
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { setShowStep(1); return undefined }
+    const t = window.setTimeout(() => setShowStep(1), 900)
+    return () => window.clearTimeout(t)
+  }, [mode])
+
+  // Header balance follows the table: after the entry leaves and after the payout lands.
+  const refreshRef = useRef(refreshBalance)
+  refreshRef.current = refreshBalance
+  useEffect(() => { if (phase === 'confirmed' || handOver) refreshRef.current() }, [phase, handOver])
+
+  function resetTable() {
+    socketRef.current?.close()
+    setMode('lobby'); setRoundId(null); setRoundInfo(null); setMySeat(null); setPlayers([]); setBotAddress(null)
+    setMyHand([]); setEnds(null); setBoardTiles([]); setTurn(null); setBoneyardRemaining(null); setHandSizes([7, 7])
+    setPhase('idle'); setError(''); setTxHash(''); setSelectedTile(null); setResult(null); setProof(null)
+    setShowStep(0); setJoinInput('')
+  }
 
   return (
     <section className="cx-live-room dm-room" id="rooms">
@@ -1573,7 +1676,7 @@ function DominoRoom({ account, onConnect }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={false} /> DOMINO · READ-ONLY PREVIEW</span>
+            <span className="cx-eyebrow"><StatusDot online={!WAGERING_PAUSED} /> DOMINO · {WAGERING_PAUSED ? 'READ-ONLY PREVIEW' : 'LIVE TABLE'}</span>
             <h1>Heads-up at the <em>table.</em></h1>
             <p>Classic block dominoes, two players. The operator commits to a hidden seed before the table opens; the plugin only ever trusts a move log it can replay and verify itself.</p>
           </div>
@@ -1600,77 +1703,95 @@ function DominoRoom({ account, onConnect }) {
 
         {mode !== 'lobby' && (
           <div className="cx-room-layout dm-layout">
-            <div className="cx-game-stage dm-stage">
-              <div className="dm-opponent-row">
-                <span className="cx-eyebrow">OPPONENT</span>
-                <div className="dm-hand face-down-row">
+            <div className={`cx-game-stage dm-stage ${won ? 'is-win' : ''}`}>
+              {won && <WinMotes />}
+              <div className="dm-table">
+                <div className="pk-rail" aria-hidden="true" />
+
+                <TableSeat
+                  side="top" className="dm-seat" name="Opponent"
+                  stack={mode === 'waiting' ? 'Seat open' : `${handSizes[oppSeat]} tile${handSizes[oppSeat] === 1 ? '' : 's'}`}
+                  isTurn={mode === 'playing' && turn === oppSeat}
+                  winner={handOver && winnerSeats.includes(oppSeat)}
+                  badge={handOver && winnerSeats.includes(oppSeat) ? (emptied ? 'Dominoes!' : 'Lowest count') : ''}
+                >
                   {mode === 'waiting'
-                    ? (
-                      <div className="dm-waiting-copy">
-                        <p>Waiting for an opponent to join table <code>{roundId?.slice(0, 12)}…</code></p>
-                        {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
-                          <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
-                        )}
-                        {botAddress && <p>Practice opponent seated — dealing…</p>}
-                      </div>
-                    )
-                    : Array.from({ length: opponentHandSize }).map((_, index) => <DominoTile key={index} faceDown />)}
-                </div>
-              </div>
+                    ? <><span className="dm-slot" /><span className="dm-slot" /></>
+                    : Array.from({ length: handSizes[oppSeat] }).map((_, index) => (
+                      <DominoTile key={index} faceDown orientation="vertical" deal={0.04 * index} />
+                    ))}
+                </TableSeat>
 
-              <div className="dm-board">
-                {boardTiles.length === 0 && mode === 'playing' && <span className="dm-board-hint">Table is empty — play any tile to open it.</span>}
-                {boardTiles.length > 0 && (
-                  <div className="dm-board-line">
-                    {ends != null && <span className="dm-end-label">{ends[0]}</span>}
-                    <div className="dm-board-chain">
-                      {boardTiles.map((tile, index) => (
-                        <DominoTile key={`b-${index}-${tile[0]}-${tile[1]}`} tile={tile} />
-                      ))}
+                <div className="dm-center">
+                  {mode === 'waiting' ? (
+                    <div className="pk-waiting">
+                      <span className="pk-street">WAITING FOR AN OPPONENT</span>
+                      <p>Share this table ID: <code>{roundId}</code></p>
+                      {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
+                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                      )}
+                      {botAddress && <p className="pk-dealing">Practice opponent seated — dealing…</p>}
                     </div>
-                    {ends != null && <span className="dm-end-label">{ends[1]}</span>}
-                  </div>
-                )}
-                {mode === 'playing' && (
-                  <p className="dm-turn-copy">{myTurn ? 'Your turn' : "Opponent's turn"} · {boneyardRemaining ?? '—'} tiles left in the boneyard</p>
-                )}
+                  ) : (
+                    <>
+                      <div className="dm-status-row">
+                        <span className="pk-street">
+                          {mode === 'settled' ? (emptied ? 'DOMINOES' : 'TABLE BLOCKED') : myTurn ? 'YOUR MOVE' : "OPPONENT'S MOVE"}
+                        </span>
+                        <Boneyard count={boneyardRemaining} canDraw={canDraw} canPass={canPass}
+                          onDraw={() => submitMove(canDraw ? 'draw' : 'pass')} />
+                      </div>
+                      {boardTiles.length === 0
+                        ? <p className="dm-board-hint">{myTurn ? 'The table is empty — play any tile to open it.' : 'The table is empty — waiting for the opening tile.'}</p>
+                        : <DominoChain tiles={boardTiles} ends={ends} targets={endTargets}
+                          onPick={(end) => selectedTile && submitMove('play', selectedTile, end)} />}
+                      {selectedTile && <p className="dm-pick-hint">Choose an end for {selectedTile[0]}|{selectedTile[1]} — or tap the tile again to cancel.</p>}
+                    </>
+                  )}
+                </div>
+
+                <TableSeat
+                  side="bottom" className="dm-seat" name="You" you
+                  stack={mode === 'waiting' ? `${cnpy(roundInfo?.entryFee || 0)} CNPY entry` : `${myHand.length} tile${myHand.length === 1 ? '' : 's'}`}
+                  isTurn={myTurn} winner={handOver && winnerSeats.includes(seat)}
+                  badge={handOver && winnerSeats.includes(seat) ? (emptied ? 'Dominoes!' : 'Lowest count') : ''}
+                >
+                  {myHand.map((tile, index) => {
+                    const playable = myTurn && legalDominoEnds(tile, ends).length > 0
+                    const isSelected = Boolean(selectedTile && selectedTile[0] === tile[0] && selectedTile[1] === tile[1])
+                    return (
+                      <DominoTile
+                        key={`${tile[0]}-${tile[1]}`} tile={tile} orientation="vertical" deal={0.05 * index}
+                        selected={isSelected} playable={playable} dim={myTurn && !playable}
+                        disabled={!myTurn || !playable}
+                        onClick={() => (isSelected ? setSelectedTile(null) : handleTileClick(tile))}
+                      />
+                    )
+                  })}
+                  {mode === 'waiting' && !myHand.length && <><span className="dm-slot" /><span className="dm-slot" /></>}
+                </TableSeat>
               </div>
 
-              <div className="dm-hand-row">
-                <span className="cx-eyebrow">YOUR HAND</span>
-                <div className="dm-hand">
-                  {myHand.map((tile, index) => (
-                    <DominoTile
-                      key={`${tile[0]}-${tile[1]}-${index}`}
-                      tile={tile}
-                      selected={selectedTile && selectedTile[0] === tile[0] && selectedTile[1] === tile[1]}
-                      disabled={!myTurn || legalDominoEnds(tile, ends).length === 0}
-                      onClick={() => handleTileClick(tile)}
-                    />
-                  ))}
+              {handOver && (
+                <div className={`pk-outcome ${won ? 'is-win' : ''}`} role="status">
+                  <strong>
+                    {split ? 'Split decision'
+                      : iWon ? (emptied ? 'Dominoes! You emptied your hand' : 'Table blocked — you hold the lowest count')
+                      : (emptied ? 'Opponent emptied their hand' : 'Table blocked — opponent holds the lowest count')}
+                  </strong>
+                  <button className="cx-gold-button" onClick={resetTable}><span>New table</span><b>→</b></button>
                 </div>
-                {selectedTile && (
-                  <div className="dm-end-choice">
-                    <span>Play {selectedTile[0]}|{selectedTile[1]} on which end?</span>
-                    <button onClick={() => submitMove('play', selectedTile, 'left')}>Left ({ends[0]})</button>
-                    <button onClick={() => submitMove('play', selectedTile, 'right')}>Right ({ends[1]})</button>
-                  </div>
-                )}
-                {myTurn && !hasLegalPlay && (
-                  <button className="cx-gold-button dm-draw-button" onClick={() => submitMove(boneyardRemaining > 0 ? 'draw' : 'pass')}>
-                    <span>{boneyardRemaining > 0 ? 'Draw a tile' : 'Pass'}</span><b>→</b>
-                  </button>
-                )}
-              </div>
+              )}
             </div>
 
             <div className="round-side dm-side">
               <TxStatus phase={phase} error={error} txHash={txHash} />
-              {mode === 'settled' && result && (
+              {handOver && result && (
                 <div className={`result-card ${won ? 'is-win' : ''}`}>
                   <span className="cx-eyebrow">ROUND RESULT</span>
-                  <strong>{won ? 'You won' : 'No luck this game'}</strong>
-                  <p>{result.reason === 'blocked' ? 'Table blocked' : 'Hand emptied'} · {won ? `+${cnpy(myPayout)} CNPY net of rake.` : 'Better luck at the next table.'}</p>
+                  <strong>{won ? 'You won' : split ? 'Split decision' : 'No luck this game'}</strong>
+                  {won && myNet != null && <span className="rw-win-amount">+{cnpyShort(shownNet)} <small>CNPY</small></span>}
+                  <p>{emptied ? 'Hand emptied' : 'Table blocked'} · {won ? 'Profit after rake, paid on-chain.' : 'Better luck at the next table.'}</p>
                 </div>
               )}
             </div>
@@ -2088,7 +2209,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
               <div className={`pk-table ${mode === 'settled' ? 'is-settled' : ''}`}>
                 <div className="pk-rail" aria-hidden="true" />
 
-                <PokerSeat
+                <TableSeat
                   side="top" name="Opponent" you={false}
                   stack={mode === 'waiting' ? 'Seat open' : `${cnpy(stackOf(oppSeat))} CNPY`}
                   bet={mode === 'playing' ? table.streetContributed[oppSeat] : 0}
@@ -2110,7 +2231,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
                         win={Boolean(playingCards && card && playingCards.has(cardKey(card)))} />
                     )
                   })}
-                </PokerSeat>
+                </TableSeat>
 
                 <div className="pk-center">
                   {mode === 'waiting' ? (
@@ -2141,7 +2262,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
                   )}
                 </div>
 
-                <PokerSeat
+                <TableSeat
                   side="bottom" name="You" you
                   stack={mode === 'waiting' ? `${cnpy(roundInfo?.buyIn || 0)} CNPY` : `${cnpy(stackOf(seat))} CNPY`}
                   bet={mode === 'playing' ? table.streetContributed[seat] : 0}
@@ -2157,7 +2278,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
                       win={Boolean(playingCards && playingCards.has(cardKey(card)))} />
                   ))}
                   {!myHole.length && !holes?.[seat] && <><span className="pk-slot" /><span className="pk-slot" /></>}
-                </PokerSeat>
+                </TableSeat>
               </div>
 
               {mode === 'playing' && (
@@ -2557,7 +2678,7 @@ export default function Experience() {
           ) : view === 'roulette' ? (
             <RouletteRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} refreshBalance={refreshBalance} />
           ) : view === 'domino' ? (
-            <DominoRoom key={account?.address || 'guest'} account={account} onConnect={connect} />
+            <DominoRoom key={account?.address || 'guest'} account={account} onConnect={connect} refreshBalance={refreshBalance} />
           ) : view === 'poker' ? (
             <PokerRoom key={account?.address || 'guest'} account={account} onConnect={connect} refreshBalance={refreshBalance} />
           ) : (
