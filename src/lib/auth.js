@@ -64,10 +64,10 @@ export async function requestWalletGrant({ account, action, resource, payload })
   return result.grant
 }
 
-export async function walletAuthorizedPost({ path, account, action, resource, payload }) {
+export async function walletAuthorizedPost({ path, account, action, resource, payload, timeoutMs = 10000 }) {
   requireWagering()
   const grant = await requestWalletGrant({ account, action, resource, payload })
-  return jsonWalletPost(path, payload, grant)
+  return jsonWalletPost(path, payload, grant, { timeoutMs })
 }
 
 export function walletOperation(address, txHash, fields = {}) {

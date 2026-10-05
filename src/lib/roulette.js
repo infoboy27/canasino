@@ -1,8 +1,10 @@
-import { jsonGet, jsonPost, websocket } from './api.js'
+import { jsonGet, websocket } from './api.js'
+import { lobbyRoulette } from './lobby.js'
 import { walletAuthorizedPost, walletOperation } from './auth.js'
 
+// The round currently taking bets (opened by the service if there is none).
 export function openRouletteRound() {
-  return jsonPost('/roulette/rounds')
+  return lobbyRoulette()
 }
 
 export function getRouletteRoundInfo(roundId) {

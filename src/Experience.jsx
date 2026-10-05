@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, jsonGet, PRACTICE_OPPONENT } from './lib/api.js'
+import { getCapabilities, seatHouseRival } from './lib/lobby.js'
 import { openMoveSession } from './lib/session.js'
 import { bestHand } from './lib/pokerEval.js'
 import { CENTER, LETTERS, cardProgress, columnNumbers, flattenCard } from './lib/bingoLines.js'
@@ -883,6 +884,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
         await new Promise((resolve) => setTimeout(resolve, 5000))
         await registerRound(round.roundId, account.address, numCards, hash)
       }
+      // One signature lets this player read their own card for this room.
+      await openMoveSession('bingo', round.roundId, account)
       setPhase('confirmed')
       getRoundProof(round.roundId).then(setProof).catch(() => null)
 
@@ -1034,7 +1037,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
           <div className="control-section action-control">
             <span className="control-label">03 · WAGERING</span>
             {!round ? (
-              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || !selectedRoom || roomsState !== 'ready'}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : 'Create room'}</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || !selectedRoom || roomsState !== 'ready'}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : 'Open table'}</span><b>→</b></button>
             ) : phase === 'confirmed' ? (
               <button className="cx-confirmed-button" disabled><span>Entry registered</span><b>✓</b></button>
             ) : (
@@ -1386,6 +1389,8 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [turn, setTurn] = useState(null)
   const [boneyardRemaining, setBoneyardRemaining] = useState(null)
   const [handSizes, setHandSizes] = useState([7, 7])
+  const [houseRival, setHouseRival] = useState(false) // devnet: the service can seat the house as your opponent
+  const [houseSeated, setHouseSeated] = useState(false)
   const [showStep, setShowStep] = useState(0) // 0 last tile just landed -> 1 result announced
   const [joinInput, setJoinInput] = useState('')
   const [phase, setPhase] = useState('idle')
@@ -1395,6 +1400,12 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [result, setResult] = useState(null)
   const [proof, setProof] = useState(null)
   const socketRef = useRef(null)
+
+  useEffect(() => {
+    let alive = true
+    getCapabilities().then((c) => { if (alive) setHouseRival(Boolean(c?.houseRival)) }).catch(() => null)
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (mode !== 'waiting' || !roundId) return undefined
@@ -1472,7 +1483,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
         let boneyard = boneyardRemaining ?? 0
         for (let guard = 0; guard < 30 && !cancelled; guard++) {
           let hand
-          try { ({ hand } = await getDominoHand(roundId, botAddress)) }
+          try { ({ hand } = await getDominoHand(roundId, botAddress, { operator: true })) }
           catch { await new Promise((r) => setTimeout(r, 2000)); continue }
           const playable = hand.find((tile) => (ends == null) || legalDominoEnds(tile, ends).length > 0)
           let resp
@@ -1590,7 +1601,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   async function handleCreateTable() {
     setError('')
     try {
-      const created = await openDominoRound()
+      const created = await openDominoRound(account)
       const rid = created.roundId
       const info = await getDominoRoundInfo(rid)
       const infoObj = {
@@ -1607,6 +1618,11 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
 
   async function handleAddOpponent() {
     setError('')
+    if (houseRival) {
+      try { await seatHouseRival('domino', roundId, account); setHouseSeated(true) }
+      catch (err) { setError(err?.message || 'The house could not take the seat.') }
+      return
+    }
     const mine = account.address.toLowerCase()
     try {
       const seated = await addDominoOpponent(roundId)
@@ -1724,7 +1740,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   function resetTable() {
     socketRef.current?.close()
     setMode('lobby'); setRoundId(null); setRoundInfo(null); setMySeat(null); setPlayers([]); setBotAddress(null)
-    setMyHand([]); setEnds(null); setBoardTiles([]); setTurn(null); setBoneyardRemaining(null); setHandSizes([7, 7])
+    setMyHand([]); setEnds(null); setBoardTiles([]); setTurn(null); setBoneyardRemaining(null); setHandSizes([7, 7]); setHouseSeated(false)
     setPhase('idle'); setError(''); setTxHash(''); setSelectedTile(null); setResult(null); setProof(null)
     setShowStep(0); setJoinInput('')
   }
@@ -1788,10 +1804,10 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
                     <div className="pk-waiting">
                       <span className="pk-street">WAITING FOR AN OPPONENT</span>
                       <p>Share this table ID: <code>{roundId}</code></p>
-                      {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
-                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                      {(houseRival || PRACTICE_OPPONENT) && mySeat === 0 && !botAddress && !houseSeated && (
+                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>{houseRival ? 'Play against the house' : 'Add practice opponent'}</span><b>→</b></button>
                       )}
-                      {botAddress && <p className="pk-dealing">Practice opponent seated — dealing…</p>}
+                      {(botAddress || houseSeated) && <p className="pk-dealing">{houseSeated ? 'The house took the seat' : 'Practice opponent seated'} — dealing…</p>}
                     </div>
                   ) : (
                     <>
@@ -1890,6 +1906,8 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [mySeat, setMySeat] = useState(null)
   const [, setPlayers] = useState([])
   const [botAddress, setBotAddress] = useState(null)
+  const [houseRival, setHouseRival] = useState(false) // devnet: the service can seat the house as your opponent
+  const [houseSeated, setHouseSeated] = useState(false)
   const [myHole, setMyHole] = useState([])
   const [table, setTable] = useState(POKER_EMPTY_TABLE)
   const [showStep, setShowStep] = useState(0) // 0 hand ending -> 1 cards turn over -> 2 result announced
@@ -1911,6 +1929,12 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
       allIn: status.allIn || [false, false], finished: Boolean(status.finished),
     })
   }
+
+  useEffect(() => {
+    let alive = true
+    getCapabilities().then((c) => { if (alive) setHouseRival(Boolean(c?.houseRival)) }).catch(() => null)
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (mode !== 'waiting' || !roundId) return undefined
@@ -2081,7 +2105,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   async function handleCreateTable() {
     setError('')
     try {
-      const created = await openPokerRound()
+      const created = await openPokerRound(account)
       const rid = created.roundId
       const info = await getPokerRoundInfo(rid)
       const infoObj = {
@@ -2099,6 +2123,11 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
 
   async function handleAddOpponent() {
     setError('')
+    if (houseRival) {
+      try { await seatHouseRival('poker', roundId, account); setHouseSeated(true) }
+      catch (err) { setError(err?.message || 'The house could not take the seat.') }
+      return
+    }
     const mine = account.address.toLowerCase()
     try {
       const seated = await addPokerOpponent(roundId)
@@ -2226,7 +2255,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   function resetTable() {
     socketRef.current?.close()
     setMode('lobby'); setRoundId(null); setRoundInfo(null); setMySeat(null); setPlayers([]); setBotAddress(null)
-    setMyHole([]); setTable(POKER_EMPTY_TABLE); setPhase('idle'); setError(''); setTxHash('')
+    setMyHole([]); setHouseSeated(false); setTable(POKER_EMPTY_TABLE); setPhase('idle'); setError(''); setTxHash('')
     setRaiseAmount(''); setResult(null); setProof(null); setShowStep(0); setJoinInput('')
   }
 
@@ -2299,10 +2328,10 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
                     <div className="pk-waiting">
                       <span className="pk-street">WAITING FOR AN OPPONENT</span>
                       <p>Share this table ID: <code>{roundId}</code></p>
-                      {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
-                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                      {(houseRival || PRACTICE_OPPONENT) && mySeat === 0 && !botAddress && !houseSeated && (
+                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>{houseRival ? 'Play against the house' : 'Add practice opponent'}</span><b>→</b></button>
                       )}
-                      {botAddress && <p className="pk-dealing">Practice opponent seated — dealing…</p>}
+                      {(botAddress || houseSeated) && <p className="pk-dealing">{houseSeated ? 'The house took the seat' : 'Practice opponent seated'} — dealing…</p>}
                     </div>
                   ) : (
                     <>
