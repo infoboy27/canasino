@@ -666,6 +666,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
   const [round, setRound] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
   const [phase, setPhase] = useState('idle')
+  const [opening, setOpening] = useState(false)
   const [error, setError] = useState('')
   const [txHash, setTxHash] = useState('')
   const [cards, setCards] = useState([])
@@ -815,7 +816,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
   }
 
   async function handleCreateRoom() {
-    if (!selectedRoom) return
+    if (!selectedRoom || opening) return
+    setOpening(true)
     setError('')
     setResult(null)
     setBalls([])
@@ -845,6 +847,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
       setMessages([{ id: 'created', type: 'system', user: 'Canasino', text: `Live round ${roundId.slice(0, 8)}… created. Chat is now linked to this room.` }])
     } catch (err) {
       setError(err?.status ? err.message : `Could not create the live room: ${err.message}`)
+    } finally {
+      setOpening(false)
     }
   }
 
@@ -1037,7 +1041,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
           <div className="control-section action-control">
             <span className="control-label">03 · WAGERING</span>
             {!round ? (
-              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || !selectedRoom || roomsState !== 'ready'}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : 'Open table'}</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || opening || !selectedRoom || roomsState !== 'ready'} aria-busy={opening}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : opening ? 'Opening table…' : 'Open table'}</span><b>→</b></button>
             ) : phase === 'confirmed' ? (
               <button className="cx-confirmed-button" disabled><span>Entry registered</span><b>✓</b></button>
             ) : (
