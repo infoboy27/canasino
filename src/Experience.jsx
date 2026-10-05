@@ -3,6 +3,7 @@ import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, jsonGet, PRACTICE_OPPONENT } from './lib/api.js'
 import { openMoveSession } from './lib/session.js'
 import { bestHand } from './lib/pokerEval.js'
+import { CENTER, LETTERS, cardProgress, columnNumbers, flattenCard } from './lib/bingoLines.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
 import {
   connectFleet,
@@ -136,7 +137,9 @@ function cnpy(raw) {
 // Display-only, 2 decimals (e.g. the win counter) -- never used for amounts that are signed or sent.
 function cnpyShort(raw) {
   const cents = Math.round(Number(raw || 0) / 10_000)
-  return Number.isFinite(cents) ? (cents / 100).toFixed(2).replace(/\.?0+$/, '') || '0' : '—'
+  if (!Number.isFinite(cents)) return '—'
+  if (cents === 0 && Number(raw) > 0) return trimTokens(raw) // tiny amounts keep their precision rather than rounding to 0
+  return (cents / 100).toFixed(2).replace(/\.?0+$/, '') || '0'
 }
 
 function timeLabel() {
@@ -236,30 +239,56 @@ function TxStatus({ phase, error, txHash }) {
   )
 }
 
-function BingoCard({ card = [], balls = [] }) {
+function BingoCard({ card = [], balls = [], dealing = false, winLine = null, label = '' }) {
   if (!Array.isArray(card) || card.length === 0) {
     return (
-      <div className="cx-card-placeholder">
+      <div className={`cx-card-placeholder ${dealing ? 'is-dealing' : ''}`}>
         <div className="placeholder-grid">{Array.from({ length: 25 }).map((_, index) => <span key={index} />)}</div>
-        <strong>Your card appears after a confirmed entry</strong>
-        <p>Numbers come from the game server only after the wallet-signed join is registered.</p>
+        <strong>{dealing ? 'Dealing your card…' : 'Your card appears after a confirmed entry'}</strong>
+        <p>{dealing ? 'Cards come from the final seed, fixed once the entropy window closes.' : 'Numbers come from the game server only after the wallet-signed join is registered.'}</p>
       </div>
     )
   }
 
-  const flatBalls = new Set(balls.map((ball) => Number(ball.number ?? ball)))
-  const matrix = Array.isArray(card[0]) ? card : [card]
+  const called = new Set(balls.map((ball) => Number(ball.number ?? ball)))
+  const flat = flattenCard(card)
+  const { marked, toGo } = cardProgress(flat, called)
+  const lastNumber = balls.length ? Number(balls[balls.length - 1].number ?? balls[balls.length - 1]) : null
+  const lit = new Set(winLine || [])
 
   return (
-    <div className="cx-bingo-card">
-      <div className="bingo-head">{['B', 'I', 'N', 'G', 'O'].map((letter) => <b key={letter}>{letter}</b>)}</div>
+    <div className={`cx-bingo-card ${winLine ? 'is-winner' : ''}`}>
+      <div className="bingo-meta">
+        {label && <span>{label}</span>}
+        <em className={toGo === 0 ? 'is-bingo' : toGo === 1 ? 'is-close' : ''}>{toGo === 0 ? 'Line complete' : `${toGo} to go`}</em>
+      </div>
+      <div className="bingo-head">{LETTERS.map((letter) => <b key={letter}>{letter}</b>)}</div>
       <div className="bingo-grid">
-        {matrix.flat().slice(0, 25).map((number, index) => {
-          const free = index === 12
-          const hit = free || flatBalls.has(Number(number))
-          return <span role="img" aria-label={free ? 'Free space, marked' : `${number}${hit ? ', marked' : ''}`} className={hit ? 'hit' : ''} key={`${number}-${index}`}>{free ? '★' : number}</span>
+        {flat.map((number, index) => {
+          const free = index === CENTER
+          const hit = marked.has(index)
+          const cls = [hit ? 'hit' : '', free ? 'free' : '', lit.has(index) ? 'in-line' : '', hit && !free && number === lastNumber ? 'just-called' : ''].filter(Boolean).join(' ')
+          return <span role="img" aria-label={free ? 'Free space, marked' : `${number}${hit ? ', marked' : ''}`} className={cls} key={`${number}-${index}`}>{free ? '★' : number}</span>
         })}
       </div>
+    </div>
+  )
+}
+
+// Every number from 1 to 75 in its B-I-N-G-O column, lit as it is called.
+function NumberBoard({ balls }) {
+  const called = new Set(balls.map((ball) => Number(ball.number)))
+  const last = balls.length ? Number(balls[balls.length - 1].number) : null
+  return (
+    <div className="number-board" role="group" aria-label="Numbers called so far">
+      {LETTERS.map((letter, column) => (
+        <div className="number-row" key={letter}>
+          <b>{letter}</b>
+          {columnNumbers(column).map((n) => (
+            <span key={n} className={`${called.has(n) ? 'called' : ''} ${n === last ? 'latest' : ''}`} aria-label={`${letter}${n}${called.has(n) ? ', called' : ''}`}>{n}</span>
+          ))}
+        </div>
+      ))}
     </div>
   )
 }
@@ -446,6 +475,7 @@ function WinMotes() {
   )
 }
 
+
 const PIP_POSITIONS = {
   0: [],
   1: [[1, 1]],
@@ -627,7 +657,7 @@ function ProofCommitment({ proof }) {
   return <label className="table-identifier"><span>Full commitment · game-service data, not independently verified here</span><input aria-label="Full proof commitment" readOnly value={String(proof.commitment)} onFocus={(event) => event.target.select()} /></label>
 }
 
-function LiveRoom({ account, onConnect, walletBalance }) {
+function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {} }) {
   const [rooms, setRooms] = useState([])
   const [roomsState, setRoomsState] = useState('loading')
   const [selectedRoom, setSelectedRoom] = useState(null)
@@ -734,6 +764,25 @@ function LiveRoom({ account, onConnect, walletBalance }) {
 
   const amount = useMemo(() => entryCost(roundInfo?.entryFee ?? selectedRoom?.entryFee ?? 0, numCards), [roundInfo, selectedRoom, numCards])
   const latestBall = balls[balls.length - 1]
+  const settled = result?.type === 'settled'
+  const myWon = Boolean(settled && account && result.winners?.some((w) => String(w).toLowerCase() === account.address))
+  const myPayout = settled && account ? result.payouts?.[account.address] : null
+  const myNet = myPayout != null ? myPayout - amount : null
+  const won = myWon // a completed line is a win; whether it nets a profit depends on how full the room was
+  const shownNet = useCountUp(myNet != null && myNet > 0 ? myNet : 0, won && myNet != null && myNet > 0)
+  // The card whose line completed first, so the win can be shown on the card itself.
+  const winningCard = useMemo(() => {
+    if (!myWon) return -1
+    const drawn = new Set(balls.map((b) => Number(b.number)))
+    return cards.findIndex((card) => cardProgress(card, drawn).winningLine)
+  }, [myWon, balls, cards])
+  const winLine = winningCard >= 0 ? cardProgress(cards[winningCard], new Set(balls.map((b) => Number(b.number)))).winningLine : null
+  const drawing = phase === 'confirmed' && balls.length > 0 && !settled
+
+  // Header balance follows the table: after the entry leaves and after the payout lands.
+  const refreshRef = useRef(refreshBalance)
+  refreshRef.current = refreshBalance
+  useEffect(() => { if (phase === 'confirmed' || settled) refreshRef.current() }, [phase, settled])
   const canOfferRefund = round?.roundId && result?.type !== 'settled' && roundCreatedAt
     && (now - roundCreatedAt) >= EXPIRE_HINT_MS
 
@@ -878,50 +927,62 @@ function LiveRoom({ account, onConnect, walletBalance }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={false} /> BINGO · READ-ONLY PREVIEW</span>
+            <span className="cx-eyebrow"><StatusDot online={!WAGERING_PAUSED} /> BINGO · {WAGERING_PAUSED ? 'READ-ONLY PREVIEW' : 'LIVE ROOM'}</span>
             <h1>Explore the <em>gold room.</em></h1>
-            <p>Inspect the table and wallet flow. Creating rounds, signing entries and live chat remain disabled during the security review.</p>
+            <p>{WAGERING_PAUSED ? 'Inspect the table and wallet flow. Creating rounds, signing entries and live chat remain disabled during the security review.' : 'Seventy-five balls, one seed committed before anyone joins. The first completed line takes the pot.'}</p>
           </div>
         </div>
 
         <div className="cx-room-layout">
-          <div className="cx-game-stage">
+          <div className={`cx-game-stage bg-stage ${won ? 'is-win' : ''}`}>
+            {won && <WinMotes />}
             <div className="stage-topbar">
-              <div><span className="table-badge"><StatusDot online={false} /> PREVIEW TABLE</span><strong>{selectedRoom?.name || 'Bingo room'}</strong></div>
+              <div><span className="table-badge"><StatusDot online={!WAGERING_PAUSED} /> {WAGERING_PAUSED ? 'PREVIEW TABLE' : 'LIVE TABLE'}</span><strong>{selectedRoom?.name || 'Bingo room'}</strong></div>
               <button className="mobile-chat-toggle" aria-expanded={chatOpen} aria-controls="mobile-room-chat" onClick={() => setChatOpen(true)}>Chat <span>{messages.filter((m) => m.type !== 'system').length}</span></button>
             </div>
 
             <div className="ball-stage">
-              <div className={`draw-machine ${latestBall ? 'has-ball' : ''}`}>
+              <div className={`draw-machine ${latestBall ? 'has-ball' : ''} ${drawing ? 'is-drawing' : ''}`}>
                 <span className="machine-ring ring-1" />
                 <span className="machine-ring ring-2" />
-                <div className="draw-ball">
+                <div className="draw-ball" key={latestBall ? latestBall.number : 'idle'}>
                   {latestBall ? <><small>{latestBall.letter || ''}</small><strong>{latestBall.number}</strong></> : <><small>ROUND</small><strong>{round ? 'DATA' : '—'}</strong></>}
                 </div>
               </div>
               <div className="draw-copy">
-                <span className="cx-eyebrow">CURRENT DRAW</span>
+                <span className="cx-eyebrow">{settled ? 'FINAL BALL' : 'CURRENT DRAW'}</span>
                 <h2>{latestBall ? `${latestBall.letter || ''}${latestBall.number}` : round ? 'Waiting for draw' : 'Create a room'}</h2>
-                <p>{round ? `${balls.length} balls reported by the round socket.` : 'Select a room below to inspect its preview.'}</p>
+                <p>{round ? (balls.length ? `${balls.length} of 75 called` : 'The draw starts once your entry is confirmed.') : 'Select a room below to inspect its preview.'}</p>
+                <div className="draw-progress" aria-hidden="true"><span style={{ width: `${(balls.length / 75) * 100}%` }} /></div>
+                <div className="recent-balls">
+                  {balls.slice(-8).reverse().map((ball, index) => <span className={index === 0 ? 'latest' : ''} key={`${ball.index ?? index}-${ball.number}`}>{ball.letter}{ball.number}</span>)}
+                  {balls.length === 0 && Array.from({ length: 5 }).map((_, index) => <span className="ghost" key={index}>•</span>)}
+                </div>
               </div>
-              <div className="recent-balls">
-                {balls.slice(-8).reverse().map((ball, index) => <span className={index === 0 ? 'latest' : ''} key={`${ball.index ?? index}-${ball.number}`}>{ball.letter}{ball.number}</span>)}
-                {balls.length === 0 && Array.from({ length: 5 }).map((_, index) => <span className="ghost" key={index}>•</span>)}
-              </div>
+              <NumberBoard balls={balls} />
             </div>
 
             <div className="player-surface">
               <div className="card-area">
                 <div className="surface-title"><span><small>YOUR CARD</small><strong>{account ? shortAddress(account.address) : 'Wallet not connected'}</strong></span>{cards.length > 1 && <b>{cards.length} cards</b>}</div>
-                {cards.length ? cards.map((card, index) => <div className="bingo-card-entry" key={index}><p className="card-number">Card {index + 1} of {cards.length}</p><BingoCard card={card} balls={balls} /></div>) : <BingoCard balls={balls} />}
+                {cards.length
+                  ? <div className="cards-grid">{cards.map((card, index) => (
+                    <div className="bingo-card-entry" key={index}>
+                      <BingoCard card={card} balls={balls} label={cards.length > 1 ? `Card ${index + 1}` : ''} winLine={index === winningCard ? winLine : null} />
+                    </div>
+                  ))}</div>
+                  : <BingoCard balls={balls} dealing={phase === 'confirmed'} />}
               </div>
               <div className="round-side">
                 <TxStatus phase={phase} error={error} txHash={txHash} />
-                {result && (
-                  <div className={`result-card ${result.winners?.includes(account?.address) ? 'is-win' : ''}`}>
+                {settled && (
+                  <div className={`result-card ${won ? 'is-win' : ''}`}>
                     <span className="cx-eyebrow">ROUND RESULT</span>
-                    <strong>{result.winners?.includes(account?.address) ? 'You won' : 'Round settled'}</strong>
-                    <p>{Array.isArray(result.winners) && result.winners.length ? `${result.winners.length} winner${result.winners.length > 1 ? 's' : ''} reported by the game service.` : 'Settlement reported by the game service.'}</p>
+                    <strong>{won ? 'Bingo! You won' : 'Round settled'}</strong>
+                    {won && myNet != null && (myNet > 0
+                      ? <span className="rw-win-amount">+{cnpyShort(shownNet)} <small>CNPY</small></span>
+                      : <span className="rw-win-amount">{cnpyShort(myPayout)} <small>CNPY PAID</small></span>)}
+                    <p>{Array.isArray(result.winners) && result.winners.length ? `${result.winners.length} winner${result.winners.length > 1 ? 's' : ''} on ball ${result.balls ?? balls.length}.` : 'Settlement reported by the game service.'}{won ? (myNet != null && myNet > 0 ? ' Profit after rake, paid on-chain.' : ' Paid on-chain, after rake.') : ''}</p>
                   </div>
                 )}
                 {canOfferRefund && !refundTxHash && (
@@ -2674,7 +2735,7 @@ export default function Experience() {
         <main id="main-content" tabIndex={-1}>
           {WAGERING_PAUSED && <div className="cx-safety-banner" role="status"><strong>Wagering paused · Preview available</strong><p>{PAUSE_MESSAGE}</p></div>}
           {view === 'bingo' ? (
-            <LiveRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} />
+            <LiveRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} refreshBalance={refreshBalance} />
           ) : view === 'roulette' ? (
             <RouletteRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} refreshBalance={refreshBalance} />
           ) : view === 'domino' ? (

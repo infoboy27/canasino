@@ -978,3 +978,62 @@ button:disabled { cursor: not-allowed; }
   .counter-control button, .mobile-chat-toggle, .chat-head button { min-width: 44px; min-height: 44px; }
   .table-identifier { margin: 16px; }
 }
+
+/* ---- Bingo polish: drop-in ball, called-number board, card states, win ---- */
+.bg-stage { position:relative; transition:border-color .6s ease, box-shadow .6s ease; }
+.ball-stage { grid-template-columns:220px 1fr; grid-template-rows:auto auto; row-gap:18px; align-items:center; padding:24px 34px 22px; }
+.ball-stage .recent-balls { position:static; margin-top:14px; flex-wrap:wrap; }
+.draw-machine.has-ball .draw-ball { animation:ballDrop .75s cubic-bezier(.2,.8,.3,1.1); }
+@keyframes ballDrop {
+  0% { transform:translateY(-84px) scale(.62) rotate(-140deg); opacity:0; filter:blur(3px); }
+  55% { transform:translateY(8px) scale(1.04) rotate(10deg); opacity:1; filter:none; }
+  75% { transform:translateY(-5px) scale(.99); }
+  100% { transform:none; }
+}
+.draw-machine.is-drawing .machine-ring.ring-1 { animation-duration:6s; border-color:rgba(212,175,55,.3); }
+.draw-machine.is-drawing .machine-ring.ring-2 { animation-duration:5s; border-color:rgba(119,213,61,.25); }
+.draw-machine.has-ball::after { content:''; position:absolute; inset:14px; border-radius:50%; pointer-events:none; box-shadow:0 0 46px rgba(212,175,55,.18); }
+.draw-progress { height:3px; border-radius:3px; background:rgba(255,255,255,.08); margin-top:12px; max-width:340px; overflow:hidden; }
+.draw-progress span { display:block; height:100%; background:linear-gradient(90deg, var(--cx-gold), var(--cx-gold-soft)); box-shadow:0 0 10px rgba(212,175,55,.5); transition:width .5s ease; }
+
+.number-board { grid-column:1 / -1; display:grid; gap:4px; padding:12px 14px; border:1px solid var(--cx-line); border-radius:14px; background:rgba(0,0,0,.2); position:relative; z-index:1; }
+.number-row { display:grid; grid-template-columns:22px repeat(15, 1fr); gap:3px; align-items:center; }
+.number-row b { font:700 12px 'Fraunces', serif; color:var(--cx-gold-soft); text-align:center; }
+.number-row span { height:20px; display:grid; place-items:center; border-radius:5px; font:500 9px 'DM Sans', sans-serif; color:#555d56; background:rgba(255,255,255,.02); font-variant-numeric:tabular-nums; transition:background .3s ease, color .3s ease, box-shadow .3s ease; }
+.number-row span.called { color:#171309; font-weight:700; background:linear-gradient(145deg, #efd77d, #b99027); }
+.number-row span.latest { box-shadow:0 0 0 2px var(--cx-gold-soft), 0 0 14px rgba(212,175,55,.6); animation:markHit .5s ease-out; }
+
+.cards-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:18px; align-items:start; }
+.cx-bingo-card { max-width:none; width:100%; margin:0; padding:12px; transition:border-color .5s ease, box-shadow .5s ease; }
+.bingo-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 2px 6px; min-height:22px; }
+.bingo-meta span { font:600 11px 'DM Sans', sans-serif; color:#8b948c; letter-spacing:.04em; }
+.bingo-meta em { margin-left:auto; font:700 10px 'DM Sans', sans-serif; font-style:normal; letter-spacing:.08em; text-transform:uppercase; padding:4px 10px; border-radius:999px; color:#8b948c; background:rgba(255,255,255,.04); border:1px solid var(--cx-line); }
+.bingo-meta em.is-close { color:var(--cx-gold-soft); border-color:rgba(238,212,125,.4); background:rgba(212,175,55,.1); animation:pkPulse 1.6s ease-in-out infinite; }
+.bingo-meta em.is-bingo { color:#171309; border-color:var(--cx-gold-soft); background:linear-gradient(145deg, #efd77d, #b99027); }
+.bingo-grid span { font-size:14px; font-family:'Fraunces', serif; font-variant-numeric:tabular-nums; position:relative; }
+.bingo-grid span.free { font-size:16px; }
+.bingo-grid span.hit { box-shadow:0 0 15px rgba(212,175,55,.14), inset 0 1px 0 rgba(255,255,255,.35); }
+.bingo-grid span.just-called { animation:markHit .5s ease-out; box-shadow:0 0 0 2px #fff6cf, 0 0 18px rgba(238,212,125,.8); }
+.bingo-grid span.in-line { z-index:1; border-color:#fff2b8; background:linear-gradient(145deg, #fbe9a0, #d4a92e); box-shadow:0 0 0 2px rgba(255,242,184,.85), 0 0 22px rgba(238,212,125,.75); animation:bgLine 1.4s ease-in-out infinite; }
+.cx-bingo-card.is-winner { border-color:rgba(238,212,125,.75); box-shadow:0 0 0 1px rgba(238,212,125,.4), 0 18px 50px rgba(212,175,55,.22); }
+.cx-card-placeholder.is-dealing .placeholder-grid { animation:pkPulse 1.4s ease-in-out infinite; opacity:.4; }
+@keyframes bgLine { 0%,100% { box-shadow:0 0 0 2px rgba(255,242,184,.7), 0 0 14px rgba(238,212,125,.5); } 50% { box-shadow:0 0 0 3px rgba(255,242,184,1), 0 0 28px rgba(238,212,125,.95); } }
+
+.cx-game-stage.is-win { border-color:rgba(212,175,55,.5); animation:rwStageWin 2.6s ease-out 1; }
+.cx-game-stage.is-win::after { content:''; position:absolute; inset:0; pointer-events:none; z-index:0; background:radial-gradient(60% 45% at 28% 22%, rgba(238,212,125,.2), transparent 70%); animation:rwSweep 2.2s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .draw-machine.has-ball .draw-ball, .bingo-grid span.just-called, .bingo-grid span.in-line, .bingo-meta em.is-close, .number-row span.latest, .cx-game-stage.is-win, .cx-game-stage.is-win::after, .cx-card-placeholder.is-dealing .placeholder-grid { animation:none; }
+  .draw-progress span { transition-duration:.01ms; }
+}
+@media (max-width: 860px) {
+  .ball-stage { min-height:0; grid-template-columns:1fr; justify-items:center; text-align:center; padding:20px 14px 18px; }
+  .ball-stage .recent-balls { justify-content:center; }
+  .draw-progress { margin-inline:auto; }
+  .number-row { grid-template-columns:16px repeat(15, 1fr); gap:2px; }
+  .number-row span { height:17px; font-size:7.5px; border-radius:3px; }
+}
+/* Let the controls shrink to the viewport so the table picker scrolls inside itself instead of widening the page. */
+.cx-room-controls > * { min-width:0; }
+.room-options { scroll-snap-type:x proximity; }
+.room-options button { scroll-snap-align:start; }
