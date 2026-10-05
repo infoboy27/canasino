@@ -257,39 +257,75 @@ function BingoCard({ card = [], balls = [] }) {
   )
 }
 
-function RouletteWheel({ spinPhase, spinNumber }) {
+// Counts a number up to `target` (easeOutCubic). Used for the win payout so a
+// win feels earned; collapses to the final value when motion is reduced.
+function useCountUp(target, active, ms = 1100) {
+  const [value, setValue] = useState(0)
+  useEffect(() => {
+    if (!active || !Number.isFinite(target)) { setValue(active ? target : 0); return undefined }
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { setValue(target); return undefined }
+    let raf
+    const start = performance.now()
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / ms)
+      setValue(Math.round(target * (1 - Math.pow(1 - t, 3))))
+      if (t < 1) raf = window.requestAnimationFrame(tick)
+    }
+    raf = window.requestAnimationFrame(tick)
+    return () => window.cancelAnimationFrame(raf)
+  }, [target, active, ms])
+  return value
+}
+
+// Pocket centre sits at index*A + A/2 around the disc; rotating the disc by the
+// negative of that puts the winning pocket exactly under the pointer.
+const pocketCentre = (number) => WHEEL_ORDER.indexOf(number) * POCKET_ANGLE + POCKET_ANGLE / 2
+
+function RouletteWheel({ spinPhase, spinNumber, revealed = false }) {
   const [rotation, setRotation] = useState(0)
-  const spinningRef = useRef(false)
+  const [ball, setBall] = useState({ angle: 0, drop: false })
+  const motion = useRef({ disc: 0, ball: 0 })
 
   useEffect(() => {
-    if (spinPhase !== 'spinning') { spinningRef.current = false; return undefined }
-    spinningRef.current = true
+    if (spinPhase === 'waiting') {
+      motion.current = { disc: 0, ball: 0 }
+      setRotation(0); setBall({ angle: 0, drop: false })
+      return undefined
+    }
+    if (spinPhase !== 'spinning') return undefined
     let raf
     const tick = () => {
-      if (!spinningRef.current) return
-      setRotation((value) => value + 7)
+      motion.current.disc += 4.2
+      motion.current.ball -= 9.5
+      setRotation(motion.current.disc)
+      setBall({ angle: motion.current.ball, drop: false })
       raf = window.requestAnimationFrame(tick)
     }
     raf = window.requestAnimationFrame(tick)
-    return () => { spinningRef.current = false; window.cancelAnimationFrame(raf) }
+    return () => window.cancelAnimationFrame(raf)
   }, [spinPhase])
 
   useEffect(() => {
     if (spinPhase !== 'settled' || spinNumber == null) return
-    spinningRef.current = false
-    const pocketIndex = WHEEL_ORDER.indexOf(spinNumber)
-    setRotation((value) => (value - (value % 360)) + 4 * 360 - pocketIndex * POCKET_ANGLE)
+    // Disc eases to the winning pocket; the ball keeps orbiting the other way,
+    // loses speed, then drops onto the pocket a beat after the disc has slowed.
+    setRotation(Math.ceil(motion.current.disc / 360) * 360 + 4 * 360 - pocketCentre(spinNumber))
+    setBall({ angle: Math.floor(motion.current.ball / 360) * 360 - 3 * 360, drop: true })
   }, [spinPhase, spinNumber])
 
+  const landed = spinPhase === 'settled' && spinNumber != null
+  const settled = landed && revealed
+  const visible = spinPhase === 'spinning' || landed
   return (
-    <div className="rw-wheel-wrap">
+    <div className={`rw-wheel-wrap ${settled ? 'is-settled' : ''} ${spinPhase === 'spinning' || (landed && !revealed) ? 'is-spinning' : ''}`}>
       <span className="rw-pointer" aria-hidden="true" />
+      <div className="rw-rim" aria-hidden="true" />
       <div
         className="rw-disc"
         style={{
           background: `conic-gradient(${WHEEL_GRADIENT})`,
           transform: `rotate(${rotation}deg)`,
-          transition: spinPhase === 'settled' ? 'transform 4.2s cubic-bezier(.12,.83,.19,1)' : 'none',
+          transition: landed ? 'transform 4.6s cubic-bezier(.14,.78,.2,1)' : 'none',
         }}
         aria-hidden="true"
       >
@@ -299,55 +335,106 @@ function RouletteWheel({ spinPhase, spinNumber }) {
             <span
               className={`rw-pocket-label ${colorOf(number)}`}
               key={number}
-              style={{ transform: `rotate(${angle}deg) translateY(-96px) rotate(${-angle}deg)` }}
+              style={{ transform: `rotate(${angle}deg) translateY(calc(var(--rw-disc) * -0.405)) rotate(${-angle}deg)` }}
             >
               {number}
             </span>
           )
         })}
+        <span className="rw-disc-ring" />
       </div>
-      <div className={`rw-hub ${colorOf(spinNumber ?? -1)} ${spinPhase === 'settled' ? 'has-result' : ''}`}>
-        <strong>{spinPhase === 'settled' && spinNumber != null ? spinNumber : '—'}</strong>
+      <span
+        className="rw-ball"
+        aria-hidden="true"
+        style={{
+          opacity: visible ? 1 : 0,
+          transform: `rotate(${ball.angle}deg) translateY(calc(var(--rw-disc) * ${ball.drop ? -0.448 : -0.472}))`,
+          transition: ball.drop ? 'transform 5.4s cubic-bezier(.2,.7,.25,1), opacity .4s' : 'opacity .4s',
+        }}
+      />
+      <div className={`rw-hub ${colorOf(spinNumber ?? -1)} ${settled ? 'has-result' : ''}`}>
+        <strong>{settled ? spinNumber : '—'}</strong>
       </div>
     </div>
   )
 }
 
-function BettingTable({ selectedBet, onSelect, disabled }) {
+function BettingTable({ selectedBet, onSelect, disabled, chip = null, winning = null }) {
   const isSelected = (type, number) => selectedBet?.type === type && (type !== 'straight' || selectedBet?.number === number)
-  const cellClass = (type, number) => `rw-cell ${type === 'straight' ? (number === 0 ? 'zero' : colorOf(number)) : ''} ${isSelected(type, number) ? 'selected' : ''}`
+  const isWinning = (type, number) => {
+    if (winning == null) return false
+    if (type === 'straight') return number === winning
+    if (winning === 0) return false
+    const hit = {
+      red: RED_NUMBERS.has(winning), black: !RED_NUMBERS.has(winning), odd: winning % 2 === 1, even: winning % 2 === 0,
+      low: winning <= 18, high: winning >= 19, dozen1: winning <= 12, dozen2: winning > 12 && winning <= 24, dozen3: winning > 24,
+      col1: winning % 3 === 1, col2: winning % 3 === 2, col3: winning % 3 === 0,
+    }
+    return Boolean(hit[type])
+  }
+  const cellClass = (type, number) => [
+    'rw-cell', type === 'straight' ? (number === 0 ? 'zero' : colorOf(number)) : '',
+    isSelected(type, number) ? 'selected' : '', isWinning(type, number) ? 'is-winning' : '',
+  ].filter(Boolean).join(' ')
+  // A chip rides on whichever cell carries the player's bet: a dashed "ghost"
+  // while it is only selected, a solid gold chip once it is locked in.
+  const chipOn = (type, number) => {
+    const on = chip ? chip.type === type && (type !== 'straight' || chip.number === number)
+      : isSelected(type, number)
+    if (!on) return null
+    return <span className={`rw-chip ${chip ? 'is-locked' : 'is-ghost'}`} aria-hidden="true">{chip ? shortStake(chip.amount) : ''}</span>
+  }
+  const cell = (type, number, label, extra = {}) => (
+    <button type="button" key={`${type}-${number}`} className={`${cellClass(type, number)} ${extra.className || ''}`} aria-label={extra.aria || label}
+      aria-pressed={isSelected(type, number)} onClick={() => onSelect(type, number)} disabled={disabled}>
+      <span className="rw-cell-label">{label}</span>{chipOn(type, number)}
+    </button>
+  )
 
   return (
     <div className={`rw-table ${disabled ? 'is-disabled' : ''}`}>
       <p className="rw-scroll-hint">Swipe horizontally to inspect the full table.</p>
-      <div className="rw-grid">
-        <button type="button" className={cellClass('straight', 0)} aria-label="Straight 0" aria-pressed={isSelected('straight', 0)} onClick={() => onSelect('straight', 0)} disabled={disabled}>0</button>
-        <div className="rw-grid-body">
-          {TABLE_ROWS.map((row) => (
-            <div className="rw-grid-row" key={row.bet}>
-              {row.numbers.map((number) => (
-                <button type="button" key={number} className={cellClass('straight', number)} aria-label={`Straight ${number}`} aria-pressed={isSelected('straight', number)} onClick={() => onSelect('straight', number)} disabled={disabled}>
-                  {number}
-                </button>
-              ))}
-              <button type="button" className={`rw-cell rw-col-bet ${isSelected(row.bet) ? 'selected' : ''}`} aria-label={`Column ${row.bet.slice(-1)}, pays 2 to 1`} aria-pressed={isSelected(row.bet)} onClick={() => onSelect(row.bet)} disabled={disabled}>2:1</button>
-            </div>
-          ))}
+      <div className="rw-felt">
+        <div className="rw-grid">
+          {cell('straight', 0, '0', { aria: 'Straight 0' })}
+          <div className="rw-grid-body">
+            {TABLE_ROWS.map((row) => (
+              <div className="rw-grid-row" key={row.bet}>
+                {row.numbers.map((number) => cell('straight', number, String(number), { aria: `Straight ${number}` }))}
+                {cell(row.bet, 0, '2:1', { className: 'rw-col-bet', aria: `Column ${row.bet.slice(-1)}, pays 2 to 1` })}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="rw-outside">
+          {cell('dozen1', 0, '1st 12')}{cell('dozen2', 0, '2nd 12')}{cell('dozen3', 0, '3rd 12')}
+        </div>
+        <div className="rw-outside rw-outside-even">
+          {cell('low', 0, '1–18')}{cell('even', 0, 'Even')}
+          {cell('red', 0, 'Red', { className: 'red' })}{cell('black', 0, 'Black', { className: 'black' })}
+          {cell('odd', 0, 'Odd')}{cell('high', 0, '19–36')}
         </div>
       </div>
-      <div className="rw-outside">
-        <button type="button" className={`rw-cell ${isSelected('dozen1') ? 'selected' : ''}`} aria-pressed={isSelected('dozen1')} onClick={() => onSelect('dozen1')} disabled={disabled}>1st 12</button>
-        <button type="button" className={`rw-cell ${isSelected('dozen2') ? 'selected' : ''}`} aria-pressed={isSelected('dozen2')} onClick={() => onSelect('dozen2')} disabled={disabled}>2nd 12</button>
-        <button type="button" className={`rw-cell ${isSelected('dozen3') ? 'selected' : ''}`} aria-pressed={isSelected('dozen3')} onClick={() => onSelect('dozen3')} disabled={disabled}>3rd 12</button>
-      </div>
-      <div className="rw-outside rw-outside-even">
-        <button type="button" className={`rw-cell ${isSelected('low') ? 'selected' : ''}`} aria-pressed={isSelected('low')} onClick={() => onSelect('low')} disabled={disabled}>1–18</button>
-        <button type="button" className={`rw-cell ${isSelected('even') ? 'selected' : ''}`} aria-pressed={isSelected('even')} onClick={() => onSelect('even')} disabled={disabled}>Even</button>
-        <button type="button" className={`rw-cell red ${isSelected('red') ? 'selected' : ''}`} aria-pressed={isSelected('red')} onClick={() => onSelect('red')} disabled={disabled}>Red</button>
-        <button type="button" className={`rw-cell black ${isSelected('black') ? 'selected' : ''}`} aria-pressed={isSelected('black')} onClick={() => onSelect('black')} disabled={disabled}>Black</button>
-        <button type="button" className={`rw-cell ${isSelected('odd') ? 'selected' : ''}`} aria-pressed={isSelected('odd')} onClick={() => onSelect('odd')} disabled={disabled}>Odd</button>
-        <button type="button" className={`rw-cell ${isSelected('high') ? 'selected' : ''}`} aria-pressed={isSelected('high')} onClick={() => onSelect('high')} disabled={disabled}>19–36</button>
-      </div>
+    </div>
+  )
+}
+
+// Compact chip face: 1250000 µCNPY -> "1.3", 25000000 -> "25". The exact amount
+// is always shown in the bet panel; the chip only needs to read at a glance.
+function shortStake(raw) {
+  const whole = Number(raw || 0) / 1_000_000
+  if (!Number.isFinite(whole)) return ''
+  return whole >= 100 ? String(Math.round(whole)) : whole >= 10 ? String(Math.round(whole)) : String(Math.round(whole * 10) / 10)
+}
+
+// Soft gold motes that drift up when the player wins. Positions are fixed
+// (index-derived) so renders are stable; CSS handles the motion.
+function WinMotes() {
+  return (
+    <div className="rw-motes" aria-hidden="true">
+      {Array.from({ length: 18 }, (_, i) => (
+        <span key={i} style={/** @type {any} */ ({ '--x': `${(i * 37) % 100}%`, '--d': `${(i % 6) * 0.18}s`, '--s': `${0.5 + (i % 4) * 0.22}`, '--r': `${((i * 53) % 40) - 20}px` })} />
+      ))}
     </div>
   )
 }
@@ -825,14 +912,17 @@ function LiveRoom({ account, onConnect, walletBalance }) {
 // component papers over that by auto-opening the next round a few seconds
 // after each settle, so the table reads as "always live" from the player's
 // side without needing a backend change.
-const ROULETTE_AUTO_RESPIN_MS = 6_000
+const ROULETTE_AUTO_RESPIN_MS = 7_000
+// Time for the disc + ball animation to land before the result is revealed in text.
+const ROULETTE_REVEAL_MS = 5_000
 
-function RouletteRoom({ account, onConnect, walletBalance }) {
+function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () => {} }) {
   const [roundId, setRoundId] = useState(null)
   const [, setRoundMeta] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
   const [openError, setOpenError] = useState('')
   const [secondsLeft, setSecondsLeft] = useState(null)
+  const [windowTotal, setWindowTotal] = useState(0)
   const [spinPhase, setSpinPhase] = useState('waiting')
   const [spinResult, setSpinResult] = useState(null)
   const [proof, setProof] = useState(null)
@@ -844,8 +934,13 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
   const [txHash, setTxHash] = useState('')
   const socketRef = useRef(null)
   const respinTimerRef = useRef(null)
+  const revealTimerRef = useRef(null)
+  const [revealed, setRevealed] = useState(false)
 
   async function startNewRound() {
+    window.clearTimeout(revealTimerRef.current)
+    setRevealed(false)
+    setRoundId(null)
     setOpenError('')
     setSpinPhase('waiting')
     setSpinResult(null)
@@ -856,6 +951,7 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
     setError('')
     setTxHash('')
     setSecondsLeft(null)
+    setWindowTotal(0)
 
     try {
       const created = await openRouletteRound()
@@ -880,7 +976,7 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
 
   useEffect(() => {
     if (!WAGERING_PAUSED) startNewRound()
-    return () => window.clearTimeout(respinTimerRef.current)
+    return () => { window.clearTimeout(respinTimerRef.current); window.clearTimeout(revealTimerRef.current) }
   }, [])
 
   useEffect(() => {
@@ -892,13 +988,15 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data)
-          if (message.type === 'tick') setSecondsLeft(message.secondsLeft)
+          if (message.type === 'tick') { setSecondsLeft(message.secondsLeft); setWindowTotal((total) => Math.max(total, message.secondsLeft)) }
           if (message.type === 'spinning') { setSecondsLeft(0); setSpinPhase('spinning') }
           if (message.type === 'settled') {
             setSpinPhase('settled')
             setSpinResult(message)
             getRouletteProof(roundId).then(setProof).catch(() => null)
-            respinTimerRef.current = window.setTimeout(startNewRound, ROULETTE_AUTO_RESPIN_MS)
+            const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+            revealTimerRef.current = window.setTimeout(() => setRevealed(true), reduced ? 0 : ROULETTE_REVEAL_MS)
+            respinTimerRef.current = window.setTimeout(startNewRound, ROULETTE_AUTO_RESPIN_MS + ROULETTE_REVEAL_MS)
           }
           if (message.type === 'error') setOpenError(message.message || 'The wheel connection was lost.')
         } catch {
@@ -962,7 +1060,15 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
   }
 
   const myPayout = spinResult && myBet ? spinResult.payouts?.[account?.address] : null
-  const won = myPayout != null && myPayout > 0
+  const won = revealed && myPayout != null && myPayout > 0
+  const shownPayout = useCountUp(myPayout ?? 0, won)
+  const settledNow = spinPhase === 'settled' && spinResult && revealed
+  // The wallet balance in the header follows the table: after the stake leaves and after the payout lands.
+  const resultShown = Boolean(settledNow)
+  const refreshRef = useRef(refreshBalance)
+  refreshRef.current = refreshBalance
+  useEffect(() => { if (phase === 'confirmed' || resultShown) refreshRef.current() }, [phase, resultShown])
+  const countdownPct = windowTotal > 0 && secondsLeft != null ? Math.max(0, Math.min(100, (secondsLeft / windowTotal) * 100)) : 0
 
   return (
     <section className="cx-live-room rw-room" id="rooms">
@@ -972,39 +1078,47 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
       <div className="cx-room-main">
         <div className="cx-room-heading">
           <div>
-            <span className="cx-eyebrow"><StatusDot online={false} /> ROULETTE · READ-ONLY PREVIEW</span>
+            <span className="cx-eyebrow"><StatusDot online={!WAGERING_PAUSED} /> ROULETTE · {WAGERING_PAUSED ? 'READ-ONLY PREVIEW' : 'LIVE TABLE'}</span>
             <h1>Spin the <em>wheel.</em></h1>
             <p>European single-zero wheel. The operator commits to a hidden seed before the table opens; the spin is derived from it and only revealed at settle.</p>
           </div>
         </div>
 
         <div className="cx-room-layout rw-layout">
-          <div className="cx-game-stage rw-stage">
+          <div className={`cx-game-stage rw-stage ${spinPhase === 'spinning' ? 'is-spinning' : ''} ${settledNow ? 'is-settled' : ''} ${won ? 'is-win' : ''}`}>
+            {won && <WinMotes />}
             <div className="rw-stage-top">
-              <RouletteWheel spinPhase={spinPhase} spinNumber={spinResult?.spin} />
+              <RouletteWheel spinPhase={spinPhase} spinNumber={spinResult?.spin} revealed={revealed} />
               <div className="rw-status-copy">
                 <span className="cx-eyebrow">
-                  {WAGERING_PAUSED ? 'TABLE PREVIEW' : spinPhase === 'spinning' ? 'SPINNING' : spinPhase === 'settled' ? 'RESULT' : 'BETS OPEN'}
+                  {WAGERING_PAUSED ? 'TABLE PREVIEW' : spinPhase === 'spinning' || (spinPhase === 'settled' && !revealed) ? 'NO MORE BETS' : settledNow ? 'RESULT' : roundId ? 'BETS OPEN' : 'OPENING'}
                 </span>
-                <h2>
-                  {WAGERING_PAUSED ? 'Wagering paused' : spinPhase === 'settled' && spinResult
-                    ? `${spinResult.spin} ${spinResult.color}`
-                    : spinPhase === 'spinning'
-                    ? 'No more bets'
-                    : secondsLeft != null ? `${secondsLeft}s to place a bet` : 'Opening the table…'}
+                <h2 className={settledNow ? `rw-result ${colorOf(spinResult.spin)}` : ''}>
+                  {WAGERING_PAUSED ? 'Wagering paused' : settledNow
+                    ? <><b className="rw-result-num">{spinResult.spin}</b> {spinResult.color}</>
+                    : spinPhase === 'spinning' || spinPhase === 'settled'
+                    ? 'The wheel is spinning'
+                    : secondsLeft != null ? <><b className="rw-count">{secondsLeft}</b><span className="rw-count-unit">s to bet</span></> : 'Opening the table…'}
                 </h2>
                 <p>
-                  {WAGERING_PAUSED ? 'Explore the wheel layout. No round or transaction will be created.' : spinPhase === 'settled'
-                    ? `Table respins in a few seconds — proof is on the right.`
+                  {WAGERING_PAUSED ? 'Explore the wheel layout. No round or transaction will be created.' : settledNow
+                    ? 'A new wheel opens in a few seconds. The proof is below.'
+                    : spinPhase === 'spinning' || spinPhase === 'settled'
+                    ? 'The result comes from the seed committed before betting opened.'
                     : myBet
                     ? `Your bet: ${betLabel(myBet)} · ${cnpy(myBet.amount)} CNPY`
-                    : 'Pick a number or an outside bet below, then place it before the countdown ends.'}
+                    : 'Pick a number or an outside bet, then place it before the countdown ends.'}
                 </p>
+                {!WAGERING_PAUSED && spinPhase === 'waiting' && roundId && (
+                  <div className="rw-countdown" role="progressbar" aria-label="Time left to bet" aria-valuemin={0} aria-valuemax={windowTotal || 1} aria-valuenow={secondsLeft ?? 0}>
+                    <span style={{ width: `${countdownPct}%` }} />
+                  </div>
+                )}
                 {openError && <p className="error-copy">{openError}</p>}
               </div>
             </div>
 
-            <BettingTable selectedBet={selectedBet} onSelect={(type, number = 0) => betsOpen && !myBet && setSelectedBet({ type, number })} disabled={!betsOpen || Boolean(myBet)} />
+            <BettingTable selectedBet={selectedBet} chip={myBet} winning={settledNow ? spinResult.spin : null} onSelect={(type, number = 0) => betsOpen && !myBet && setSelectedBet({ type, number })} disabled={!betsOpen || Boolean(myBet)} />
 
             <div className="rw-bet-controls">
               <div className="control-section rw-selected-bet">
@@ -1036,13 +1150,14 @@ function RouletteRoom({ account, onConnect, walletBalance }) {
 
           <div className="round-side rw-side">
             <TxStatus phase={phase} error={error} txHash={txHash} />
-            {spinPhase === 'settled' && spinResult && myBet && (
+            {settledNow && myBet && (
               <div className={`result-card ${won ? 'is-win' : ''}`}>
                 <span className="cx-eyebrow">ROUND RESULT</span>
                 <strong>{won ? 'You won' : 'No luck this spin'}</strong>
+                {won && <span className="rw-win-amount">+{cnpy(shownPayout)} <small>CNPY</small></span>}
                 <p>
                   {spinResult.spin} {spinResult.color} · {won
-                    ? `+${cnpy(myPayout)} CNPY net of rake.`
+                    ? 'Paid out on-chain, net of rake.'
                     : `Your ${betLabel(myBet)} bet did not match.`}
                 </p>
               </div>
@@ -2211,6 +2326,12 @@ export default function Experience() {
     }
   }
 
+  async function refreshBalance() {
+    const epoch = walletEpoch.current
+    const next = await getFleetBalance()
+    if (walletEpoch.current === epoch && next) setBalance(next)
+  }
+
   async function disconnect() {
     walletEpoch.current++
     setAccount(null)
@@ -2260,7 +2381,7 @@ export default function Experience() {
           {view === 'bingo' ? (
             <LiveRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} />
           ) : view === 'roulette' ? (
-            <RouletteRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} />
+            <RouletteRoom key={account?.address || 'guest'} account={account} onConnect={connect} walletBalance={balance} refreshBalance={refreshBalance} />
           ) : view === 'domino' ? (
             <DominoRoom key={account?.address || 'guest'} account={account} onConnect={connect} />
           ) : view === 'poker' ? (
