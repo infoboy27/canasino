@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, jsonGet, PRACTICE_OPPONENT } from './lib/api.js'
 import { getCapabilities, registerPatiently, seatHouseRival } from './lib/lobby.js'
-import { openMoveSession } from './lib/session.js'
+import { hasMoveSession, moveSessionAuth, openMoveSession } from './lib/session.js'
 import { bestHand } from './lib/pokerEval.js'
 import { CENTER, LETTERS, cardProgress, columnNumbers, flattenCard } from './lib/bingoLines.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
@@ -616,7 +616,7 @@ function TableSeat({ side, name, stack, bet = 0, isTurn = false, isDealer = fals
   )
 }
 
-function ChatPanel({ messages, value, onChange, onSend, connected, account, mobileClose = null, panelId = undefined }) {
+function ChatPanel({ messages, value, onChange, onSend, connected, account, canSpeak = false, mobileClose = null, panelId = undefined }) {
   return (
     <aside className="cx-chat-panel" id={panelId}>
       <div className="chat-head">
@@ -632,8 +632,8 @@ function ChatPanel({ messages, value, onChange, onSend, connected, account, mobi
         ))}
       </div>
       <form className="chat-compose" onSubmit={onSend}>
-        <input aria-label="Message the room" value={value} onChange={(event) => onChange(event.target.value)} placeholder={account ? 'Message the room…' : 'Connect wallet to chat'} disabled={!connected || !account} maxLength={240} />
-        <button disabled={!connected || !account || !value.trim()} aria-label="Send message">↑</button>
+        <input aria-label="Message the room" value={value} onChange={(event) => onChange(event.target.value)} placeholder={!account ? 'Connect wallet to chat' : canSpeak ? 'Message the room…' : 'Join the table to chat'} disabled={!connected || !canSpeak} maxLength={240} />
+        <button disabled={!connected || !canSpeak || !value.trim()} aria-label="Send message">↑</button>
       </form>
     </aside>
   )
@@ -741,6 +741,10 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
       chatWs.onmessage = (event) => {
         try {
           const incoming = JSON.parse(event.data)
+          if (incoming.type === 'chat_error') {
+            setMessages((current) => [...current.slice(-199), { id: crypto.randomUUID(), type: 'system', user: 'Canasino', text: incoming.message || 'Message not sent.' }])
+            return
+          }
           if (incoming.type !== 'chat') return
           setMessages((current) => [...current.slice(-199), {
             id: crypto.randomUUID(),
@@ -921,11 +925,22 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
     }
   }
 
-  function sendChat(event) {
+  // Only players who paid into this table may speak: each message is MAC'd with the table
+  // session (the server also checks the address is seated), so it cannot be forged.
+  const canSpeak = Boolean(account && round?.roundId && hasMoveSession(round.roundId))
+
+  async function sendChat(event) {
     event.preventDefault()
     const text = chatText.trim()
     if (!text || !account || !chatConnected || chatSocketRef.current?.readyState !== WebSocket.OPEN) return
-    chatSocketRef.current.send(JSON.stringify({ type: 'chat', user: shortAddress(account.address), text }))
+    const address = account.address.toLowerCase()
+    const ts = Date.now()
+    const auth = await moveSessionAuth(round.roundId, { address, round_id: round.roundId, read: 'chat', text, ts })
+    if (!auth) {
+      setMessages((current) => [...current.slice(-199), { id: crypto.randomUUID(), type: 'system', user: 'Canasino', text: 'Join the table to chat.' }])
+      return
+    }
+    chatSocketRef.current.send(JSON.stringify({ type: 'chat', text, address, ts, session_id: auth.sessionId, mac: auth.mac }))
     setChatText('')
   }
 
@@ -1015,7 +1030,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
             </div>
           </div>
 
-          <ChatPanel messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} />
+          <ChatPanel messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} canSpeak={canSpeak} />
         </div>
 
         <div className="cx-room-controls">
@@ -1064,7 +1079,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
         <ProofCommitment proof={proof} />
       </div>
 
-      {chatOpen && <MobileChatDialog onClose={() => setChatOpen(false)}><ChatPanel panelId="mobile-room-chat" messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} mobileClose={() => setChatOpen(false)} /></MobileChatDialog>}
+      {chatOpen && <MobileChatDialog onClose={() => setChatOpen(false)}><ChatPanel panelId="mobile-room-chat" messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} canSpeak={canSpeak} mobileClose={() => setChatOpen(false)} /></MobileChatDialog>}
     </section>
   )
 }
