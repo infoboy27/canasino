@@ -921,6 +921,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
       } else {
         setError(err?.message || 'The room entry failed.')
       }
+      // The chain rejected that tx for good: forget it so the next press sends a fresh one.
+      if (err?.status === 422) sentJoinRef.current = null
       setPhase('round-ready')
     }
   }

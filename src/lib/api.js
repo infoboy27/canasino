@@ -12,6 +12,16 @@ export function statusMessage(status) {
   return 'The game service is unavailable. Please try again later.'
 }
 
+// A 422 "receipt_invalid" means the chain rejected the player's own tx; the server's
+// message carries the chain's reason, which is the one thing worth showing verbatim.
+export function walletPostErrorMessage(status, body) {
+  const detail = body?.detail
+  if (status === 422 && detail?.code === 'receipt_invalid' && typeof detail.message === 'string') {
+    return `The chain rejected your transaction (${detail.message.replace(/^transaction failed on chain:\s*/i, '')}). Nothing was charged for it.`
+  }
+  return statusMessage(status)
+}
+
 export async function jsonGet(path, { timeoutMs = 10000, operator = false } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -140,7 +150,10 @@ export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = 
       headers: { 'Content-Type': 'application/json', Authorization: `Canasino-Wallet ${grant}` },
       body: JSON.stringify(body),
     })
-    if (!response.ok) throw Object.assign(new Error(statusMessage(response.status)), { status: response.status })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      throw Object.assign(new Error(walletPostErrorMessage(response.status, body)), { status: response.status })
+    }
     try { return await response.json() } catch { throw new Error('The game service returned an invalid response.') }
   } catch (error) {
     if (controller.signal.aborted) throw new Error('The game service timed out. Check operation history before retrying.', { cause: error })
