@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
-import { assertCanAfford, jsonGet, PRACTICE_OPPONENT } from './lib/api.js'
+import { assertCanAfford, PRACTICE_OPPONENT } from './lib/api.js'
 import { getCapabilities, registerPatiently, seatHouseRival } from './lib/lobby.js'
 import { hasMoveSession, moveSessionAuth, openMoveSession } from './lib/session.js'
 import { bestHand } from './lib/pokerEval.js'
@@ -2457,63 +2457,6 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   )
 }
 
-// Whole-CNPY display only (never used for a transaction amount) -- rounds
-// for a clean marketing stat instead of formatTokens()'s exact 6-decimal
-// precision, which reads as noise here (e.g. "48977.491588").
-function wholeCnpy(rawMicroUnits) {
-  const whole = Math.round(Number(rawMicroUnits || 0) / 1_000_000)
-  return Number.isFinite(whole) ? whole.toLocaleString() : '—'
-}
-
-function GraduationBanner() {
-  const [data, setData] = useState(null)
-  const [failed, setFailed] = useState(false)
-
-  useEffect(() => {
-    let alive = true
-    const load = () => {
-      jsonGet('/chain/graduation')
-        .then((d) => { if (alive) { setData(d); setFailed(false) } })
-        .catch(() => { if (alive) setFailed(true) })
-    }
-    load()
-    const id = window.setInterval(load, 60_000)
-    return () => { alive = false; window.clearInterval(id) }
-  }, [])
-
-  // Hide outright once graduated (the ask becomes moot) or on a persistent
-  // load failure -- a promo banner stuck on "Loading…" forever looks broken.
-  if (data?.isGraduated || (failed && !data)) return null
-
-  const pct = data ? Math.min(100, Math.max(0, data.completionPercent)) : 0
-  const tradeUrl = data?.tradeUrl || 'https://app.canopynetwork.org/chains/48'
-
-  return (
-    <section className="cx-graduation" aria-label="CASN chain graduation progress">
-      <div className="cx-graduation-copy">
-        <span className="cx-eyebrow"><StatusDot online={Boolean(data)} /> {data?.tokenSymbol || 'CASN'} · GRADUATING ON CANOPY</span>
-        <h2>Help Canasino <em>graduate.</em></h2>
-        <p>
-          {data
-            ? <>Canasino's chain is still a virtual listing on Canopy's launchpad. <strong>{wholeCnpy(data.cnpyRemaining)} CNPY</strong> more in trading volume and it graduates into its own independent chain.</>
-            : 'Loading live graduation progress…'}
-        </p>
-        <a className="cx-gold-button graduation-button" href={tradeUrl} target="_blank" rel="noreferrer">
-          <span>Trade {data?.tokenSymbol || 'CASN'} to help it graduate</span><b>↗</b>
-        </a>
-      </div>
-      <div className="cx-graduation-progress">
-        <div className="cx-graduation-bar"><div className="cx-graduation-fill" style={{ width: `${pct}%` }} /></div>
-        <div className="cx-graduation-stats">
-          <span><strong>{data ? `${pct.toFixed(1)}%` : '—'}</strong><small>to graduation</small></span>
-          <span><strong>{data ? wholeCnpy(data.currentCnpyReserve) : '—'}</strong><small>CNPY raised</small></span>
-          <span><strong>{data ? wholeCnpy(data.thresholdCnpy) : '—'}</strong><small>CNPY goal</small></span>
-        </div>
-      </div>
-    </section>
-  )
-}
-
 function Home({ onPlay }) {
   return (
     <>
@@ -2536,7 +2479,6 @@ function Home({ onPlay }) {
         </div>
       </section>
 
-      <GraduationBanner />
 
       <section className="cx-metrics">
         <div><small>TABLE PREVIEW</small><strong>Bingo</strong><span><StatusDot online={false} /> Read-only</span></div>
@@ -2600,7 +2542,7 @@ function Roadmap() {
     <section className="cx-roadmap" id="roadmap">
       <div className="cx-section-heading">
         <div><span className="cx-eyebrow">WHERE THINGS STAND</span><h2>Built in the open, <em>shipped in stages.</em></h2></div>
-        <p>The graduation progress above funds Canasino's own chain. This is the product roadmap running alongside it — what's live, what's being rolled out carefully, and what's still ahead.</p>
+        <p>This is the product roadmap — what's live, what's being rolled out carefully, and what's still ahead.</p>
       </div>
       <div className="roadmap-list">
         {ROADMAP_PHASES.map((phase) => (
