@@ -114,7 +114,7 @@ Despliegue de plugin: tags `2026.<día-del-año>.<n>` **obligatorios** (ver `REL
 
 ## 8. Crecimiento (en paralelo)
 
-- [ ] Graduación de CASN en el launchpad de Canopy (~6 %; faltan ~48 900 CNPY de volumen). El widget ya está en `canasino.org`.
+- [ ] **Decidir el camino de graduación de la chain de Canasino.** Canopy retiró el mercado virtual (`/buy` y `/sell` devuelven 403) y ahora las chains se lanzan directo en L1 pagando 50 000 CNPY por adelantado (`POST /chains/{id}/activate`). Pendiente: (a) quién paga esos 50 000 CNPY, (b) qué pasa con quienes ya tienen CASN (Canopy menciona un reembolso futuro, aún no implementado), (c) si la devnet 406 sigue igual. El banner de `canasino.org` se retira en el PR #15.
 - [ ] Ejecutar el plan de marketing semanal (artefacto publicado) y el roadmap público.
 
 ## 9. Inventario de secretos → AWS Secrets Manager
