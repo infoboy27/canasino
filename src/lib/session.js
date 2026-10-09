@@ -11,7 +11,10 @@
 import { jsonWalletPost } from './api.js'
 import { canonicalBytes, requestWalletGrant } from './auth.js'
 
-const SCOPE = { domino: 'domino_move', poker: 'poker_action' }
+const SCOPE = { domino: 'domino_move', poker: 'poker_action', bingo: 'bingo_read' }
+const sessionPath = (game, roundId) => (game === 'bingo'
+  ? `/rounds/${encodeURIComponent(roundId)}/session`
+  : `/${game}/rounds/${encodeURIComponent(roundId)}/session`)
 const SESSION_TTL_SECONDS = 1800
 
 const sessions = new Map() // roundId -> { id, key: CryptoKey, expiresAt }
@@ -37,7 +40,7 @@ export async function openMoveSession(game, roundId, account) {
     const grant = await requestWalletGrant({
       account, action: scope, resource: `move-session:${roundId}`, payload,
     })
-    const res = await jsonWalletPost(`/${game}/rounds/${encodeURIComponent(roundId)}/session`, payload, grant)
+    const res = await jsonWalletPost(sessionPath(game, roundId), payload, grant)
     if (!/^[a-f0-9]{64}$/i.test(res?.sessionSecret || '') || typeof res?.sessionId !== 'string') {
       throw new Error('The game service returned an invalid session.')
     }

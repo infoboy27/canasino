@@ -12,6 +12,16 @@ export function statusMessage(status) {
   return 'The game service is unavailable. Please try again later.'
 }
 
+// A 422 "receipt_invalid" means the chain rejected the player's own tx; the server's
+// message carries the chain's reason, which is the one thing worth showing verbatim.
+export function walletPostErrorMessage(status, body) {
+  const detail = body?.detail
+  if (status === 422 && detail?.code === 'receipt_invalid' && typeof detail.message === 'string') {
+    return `The chain rejected your transaction (${detail.message.replace(/^transaction failed on chain:\s*/i, '')}). Nothing was charged for it.`
+  }
+  return statusMessage(status)
+}
+
 export async function jsonGet(path, { timeoutMs = 10000, operator = false } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -70,7 +80,8 @@ export async function jsonPublicPost(path, body, { timeoutMs = 10000 } = {}) {
   } finally { clearTimeout(timer) }
 }
 
-const WALLET_POST = /^(?:\/(?:rounds\/[a-f0-9]{16}|(?:roulette|domino|poker)\/rounds\/[a-f0-9]{16})\/register|\/domino\/rounds\/[a-f0-9]{16}\/move|\/poker\/rounds\/[a-f0-9]{16}\/action|\/(?:domino|poker)\/rounds\/[a-f0-9]{16}\/session)$/i
+const WALLET_POST = /^(?:\/(?:rounds\/[a-f0-9]{16}|(?:roulette|domino|poker)\/rounds\/[a-f0-9]{16})\/register|\/domino\/rounds\/[a-f0-9]{16}\/move|\/poker\/rounds\/[a-f0-9]{16}\/action|\/(?:domino|poker)\/rounds\/[a-f0-9]{16}\/session|\/rounds\/[a-f0-9]{16}\/session|\/(?:domino|poker)\/rounds|\/(?:domino|poker)\/rounds\/[a-f0-9]{16}\/bot)$/i
+const SESSION_GET = /^\/(?:rounds\/[a-f0-9]{16}\/card|(?:domino|poker)\/rounds\/[a-f0-9]{16}\/hand)\?/i
 const SESSION_POST = /^\/(?:domino|poker)\/rounds\/[a-f0-9]{16}\/(?:move|action)$/i
 
 // A per-table move session (one wallet signature per table) authenticates a
@@ -102,6 +113,30 @@ export async function jsonSessionPost(path, body, sessionId, mac, { timeoutMs = 
   } finally { clearTimeout(timer) }
 }
 
+// Read YOUR OWN private state (bingo card, domino hand, poker hole cards): authenticated
+// by the table session's HMAC over {address, round, kind}, never by an operator token.
+export async function jsonSessionGet(path, sessionId, mac, { timeoutMs = 10000 } = {}) {
+  requireWagering()
+  if (!SESSION_GET.test(path) || typeof sessionId !== 'string' || sessionId.length !== 36 ||
+      !/^[a-f0-9]{64}$/i.test(mac || '')) {
+    throw new Error('Invalid session-authorized read.')
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      signal: controller.signal, credentials: 'omit', cache: 'no-store',
+      headers: { Authorization: `Canasino-Session ${sessionId}`, 'X-Canasino-Move-MAC': mac },
+    })
+    if (!response.ok) throw Object.assign(new Error(statusMessage(response.status)), { status: response.status })
+    try { return await response.json() } catch { throw new Error('The game service returned an invalid response.') }
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('The game service timed out. Please try again.', { cause: error })
+    if (error instanceof TypeError) throw new Error('Could not reach the game service. Check your connection.', { cause: error })
+    throw error
+  } finally { clearTimeout(timer) }
+}
+
 export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = {}) {
   requireWagering()
   if (!WALLET_POST.test(path) || typeof grant !== 'string' || grant.length < 32 || /\s/.test(grant)) {
@@ -115,7 +150,10 @@ export async function jsonWalletPost(path, body, grant, { timeoutMs = 10000 } = 
       headers: { 'Content-Type': 'application/json', Authorization: `Canasino-Wallet ${grant}` },
       body: JSON.stringify(body),
     })
-    if (!response.ok) throw Object.assign(new Error(statusMessage(response.status)), { status: response.status })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      throw Object.assign(new Error(walletPostErrorMessage(response.status, body)), { status: response.status })
+    }
     try { return await response.json() } catch { throw new Error('The game service returned an invalid response.') }
   } catch (error) {
     if (controller.signal.aborted) throw new Error('The game service timed out. Check operation history before retrying.', { cause: error })

@@ -64,11 +64,33 @@ export async function requestWalletGrant({ account, action, resource, payload })
   return result.grant
 }
 
-export async function walletAuthorizedPost({ path, account, action, resource, payload }) {
+// A registration that gets a 425 (tx not indexed yet) is retried by the UI. The
+// server treats an exact retry (same operation_id, same content) as idempotent
+// and does not consume another grant, so the retry must reuse BOTH the
+// operation id and the grant: a fresh operation id for the same tx hash is
+// rejected with 409, and a fresh grant would prompt the wallet again.
+const pendingGrants = new Map() // operation_id -> grant
+
+export async function walletAuthorizedPost({ path, account, action, resource, payload, timeoutMs = 10000 }) {
   requireWagering()
-  const grant = await requestWalletGrant({ account, action, resource, payload })
-  return jsonWalletPost(path, payload, grant)
+  const key = payload?.operation_id
+  let grant = key ? pendingGrants.get(key) : undefined
+  if (!grant) {
+    grant = await requestWalletGrant({ account, action, resource, payload })
+    if (key) pendingGrants.set(key, grant)
+  }
+  try {
+    const result = await jsonWalletPost(path, payload, grant, { timeoutMs })
+    if (key) pendingGrants.delete(key)
+    return result
+  } catch (error) {
+    // Only "not yet confirmed" is worth retrying with the same grant.
+    if (key && error?.status !== 425) pendingGrants.delete(key)
+    throw error
+  }
 }
+
+const operationIds = new Map() // address:txHash -> operation_id (stable across retries of the same tx)
 
 export function walletOperation(address, txHash, fields = {}) {
   const normalizedHash = typeof txHash === 'string' ? txHash.replace(/^0x/i, '').toLowerCase() : ''
@@ -76,7 +98,9 @@ export function walletOperation(address, txHash, fields = {}) {
     throw new Error('Invalid wallet transaction receipt.')
   }
   if (typeof globalThis.crypto?.randomUUID !== 'function') throw new Error('Secure operation IDs are unavailable.')
-  return { address, operation_id: globalThis.crypto.randomUUID(), tx_hash: normalizedHash, ...fields }
+  const key = `${address}:${normalizedHash}`
+  if (!operationIds.has(key)) operationIds.set(key, globalThis.crypto.randomUUID())
+  return { address, operation_id: operationIds.get(key), tx_hash: normalizedHash, ...fields }
 }
 
 export function walletAction(address, actionContext, fields = {}) {

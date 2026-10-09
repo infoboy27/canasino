@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatTokens, parseTokens, wireAmount } from './lib/amounts.js'
 import { assertCanAfford, PRACTICE_OPPONENT } from './lib/api.js'
-import { openMoveSession } from './lib/session.js'
+import { getCapabilities, registerPatiently, seatHouseRival } from './lib/lobby.js'
+import { hasMoveSession, moveSessionAuth, openMoveSession } from './lib/session.js'
 import { bestHand } from './lib/pokerEval.js'
 import { CENTER, LETTERS, cardProgress, columnNumbers, flattenCard } from './lib/bingoLines.js'
 import { PAUSE_MESSAGE, WAGERING_PAUSED } from './lib/safety.js'
@@ -615,7 +616,7 @@ function TableSeat({ side, name, stack, bet = 0, isTurn = false, isDealer = fals
   )
 }
 
-function ChatPanel({ messages, value, onChange, onSend, connected, account, mobileClose = null, panelId = undefined }) {
+function ChatPanel({ messages, value, onChange, onSend, connected, account, canSpeak = false, mobileClose = null, panelId = undefined }) {
   return (
     <aside className="cx-chat-panel" id={panelId}>
       <div className="chat-head">
@@ -631,8 +632,8 @@ function ChatPanel({ messages, value, onChange, onSend, connected, account, mobi
         ))}
       </div>
       <form className="chat-compose" onSubmit={onSend}>
-        <input aria-label="Message the room" value={value} onChange={(event) => onChange(event.target.value)} placeholder={account ? 'Message the room…' : 'Connect wallet to chat'} disabled={!connected || !account} maxLength={240} />
-        <button disabled={!connected || !account || !value.trim()} aria-label="Send message">↑</button>
+        <input aria-label="Message the room" value={value} onChange={(event) => onChange(event.target.value)} placeholder={!account ? 'Connect wallet to chat' : canSpeak ? 'Message the room…' : 'Join the table to chat'} disabled={!connected || !canSpeak} maxLength={240} />
+        <button disabled={!connected || !canSpeak || !value.trim()} aria-label="Send message">↑</button>
       </form>
     </aside>
   )
@@ -665,6 +666,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
   const [round, setRound] = useState(null)
   const [roundInfo, setRoundInfo] = useState(null)
   const [phase, setPhase] = useState('idle')
+  const [opening, setOpening] = useState(false)
+  const sentJoinRef = useRef(null) // { roundId, hash }: entry tx already on its way for this round
   const [error, setError] = useState('')
   const [txHash, setTxHash] = useState('')
   const [cards, setCards] = useState([])
@@ -738,6 +741,10 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
       chatWs.onmessage = (event) => {
         try {
           const incoming = JSON.parse(event.data)
+          if (incoming.type === 'chat_error') {
+            setMessages((current) => [...current.slice(-199), { id: crypto.randomUUID(), type: 'system', user: 'Canasino', text: incoming.message || 'Message not sent.' }])
+            return
+          }
           if (incoming.type !== 'chat') return
           setMessages((current) => [...current.slice(-199), {
             id: crypto.randomUUID(),
@@ -814,7 +821,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
   }
 
   async function handleCreateRoom() {
-    if (!selectedRoom) return
+    if (!selectedRoom || opening) return
+    setOpening(true)
     setError('')
     setResult(null)
     setBalls([])
@@ -844,6 +852,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
       setMessages([{ id: 'created', type: 'system', user: 'Canasino', text: `Live round ${roundId.slice(0, 8)}… created. Chat is now linked to this room.` }])
     } catch (err) {
       setError(err?.status ? err.message : `Could not create the live room: ${err.message}`)
+    } finally {
+      setOpening(false)
     }
   }
 
@@ -859,30 +869,34 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
     }
 
     try {
-      await assertCanAfford(account.address, amount + 10000, 'this room')
-      setPhase('awaiting-signature')
-      const signed = await joinBingoRound({
-        roundId: round.roundId,
-        numCards,
-        amount,
-        rpcUrl: roundInfo.rpcUrl,
-        chainId: roundInfo.chainId,
-        networkId: roundInfo.networkId,
-      })
-      const hash = signed?.txHash || ''
-      setTxHash(hash)
-      setPhase('submitted')
-
-      // The join tx needs a block to be indexed and reach finality before the
-      // server can verify it; give it a moment, then retry once on 425.
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerRound(round.roundId, account.address, numCards, hash)
-      } catch (registerErr) {
-        if (registerErr?.status !== 425) throw registerErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerRound(round.roundId, account.address, numCards, hash)
+      let hash
+      if (sentJoinRef.current?.roundId === round.roundId) {
+        // The entry tx was already sent; only its registration is missing.
+        // Sending another would fail on-chain ("player already joined").
+        hash = sentJoinRef.current.hash
+        setPhase('submitted')
+      } else {
+        await assertCanAfford(account.address, amount + 10000, 'this room')
+        setPhase('awaiting-signature')
+        const signed = await joinBingoRound({
+          roundId: round.roundId,
+          numCards,
+          amount,
+          rpcUrl: roundInfo.rpcUrl,
+          chainId: roundInfo.chainId,
+          networkId: roundInfo.networkId,
+        })
+        hash = signed?.txHash || ''
+        sentJoinRef.current = { roundId: round.roundId, hash }
+        setTxHash(hash)
+        setPhase('submitted')
       }
+
+      // The join tx needs a block to be indexed before the server can verify it;
+      // registerPatiently waits and retries while it is still pending (425).
+      await registerPatiently(() => registerRound(round.roundId, account.address, numCards, hash))
+      // One signature lets this player read their own card for this room.
+      await openMoveSession('bingo', round.roundId, account)
       setPhase('confirmed')
       getRoundProof(round.roundId).then(setProof).catch(() => null)
 
@@ -907,15 +921,28 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
       } else {
         setError(err?.message || 'The room entry failed.')
       }
+      // The chain rejected that tx for good: forget it so the next press sends a fresh one.
+      if (err?.status === 422) sentJoinRef.current = null
       setPhase('round-ready')
     }
   }
 
-  function sendChat(event) {
+  // Only players who paid into this table may speak: each message is MAC'd with the table
+  // session (the server also checks the address is seated), so it cannot be forged.
+  const canSpeak = Boolean(account && round?.roundId && hasMoveSession(round.roundId))
+
+  async function sendChat(event) {
     event.preventDefault()
     const text = chatText.trim()
     if (!text || !account || !chatConnected || chatSocketRef.current?.readyState !== WebSocket.OPEN) return
-    chatSocketRef.current.send(JSON.stringify({ type: 'chat', user: shortAddress(account.address), text }))
+    const address = account.address.toLowerCase()
+    const ts = Date.now()
+    const auth = await moveSessionAuth(round.roundId, { address, round_id: round.roundId, read: 'chat', text, ts })
+    if (!auth) {
+      setMessages((current) => [...current.slice(-199), { id: crypto.randomUUID(), type: 'system', user: 'Canasino', text: 'Join the table to chat.' }])
+      return
+    }
+    chatSocketRef.current.send(JSON.stringify({ type: 'chat', text, address, ts, session_id: auth.sessionId, mac: auth.mac }))
     setChatText('')
   }
 
@@ -1005,7 +1032,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
             </div>
           </div>
 
-          <ChatPanel messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} />
+          <ChatPanel messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} canSpeak={canSpeak} />
         </div>
 
         <div className="cx-room-controls">
@@ -1034,7 +1061,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
           <div className="control-section action-control">
             <span className="control-label">03 · WAGERING</span>
             {!round ? (
-              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || !selectedRoom || roomsState !== 'ready'}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : 'Create room'}</span><b>→</b></button>
+              <button className="cx-gold-button" onClick={handleCreateRoom} disabled={WAGERING_PAUSED || opening || !selectedRoom || roomsState !== 'ready'} aria-busy={opening}><span>{WAGERING_PAUSED ? 'Unavailable during audit' : opening ? 'Opening table…' : 'Open table'}</span><b>→</b></button>
             ) : phase === 'confirmed' ? (
               <button className="cx-confirmed-button" disabled><span>Entry registered</span><b>✓</b></button>
             ) : (
@@ -1054,7 +1081,7 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
         <ProofCommitment proof={proof} />
       </div>
 
-      {chatOpen && <MobileChatDialog onClose={() => setChatOpen(false)}><ChatPanel panelId="mobile-room-chat" messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} mobileClose={() => setChatOpen(false)} /></MobileChatDialog>}
+      {chatOpen && <MobileChatDialog onClose={() => setChatOpen(false)}><ChatPanel panelId="mobile-room-chat" messages={messages} value={chatText} onChange={setChatText} onSend={sendChat} connected={chatConnected} account={account} canSpeak={canSpeak} mobileClose={() => setChatOpen(false)} /></MobileChatDialog>}
     </section>
   )
 }
@@ -1067,6 +1094,8 @@ function LiveRoom({ account, onConnect, walletBalance, refreshBalance = () => {}
 const ROULETTE_AUTO_RESPIN_MS = 7_000
 // Time for the disc + ball animation to land before the result is revealed in text.
 const ROULETTE_REVEAL_MS = 5_000
+
+const BET_CUTOFF_SECONDS = 12
 
 function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () => {} }) {
   const [roundId, setRoundId] = useState(null)
@@ -1164,7 +1193,8 @@ function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () =
     return () => { ws?.close(); socketRef.current = null }
   }, [roundId])
 
-  const betsOpen = phase !== 'idle' && spinPhase === 'waiting' && (secondsLeft == null || secondsLeft > 0)
+  // A bet is a chain tx (~10 s); one signed in the last seconds lands after the server closes the window.
+  const betsOpen = phase !== 'idle' && spinPhase === 'waiting' && (secondsLeft == null || secondsLeft > BET_CUTOFF_SECONDS)
   const minBetWhole = roundInfo?.minBet ? roundInfo.minBet / 1_000_000 : 0
   const maxBetWhole = roundInfo?.maxBet ? roundInfo.maxBet / 1_000_000 : 0
 
@@ -1191,14 +1221,7 @@ function RouletteRoom({ account, onConnect, walletBalance, refreshBalance = () =
       setPhase('submitted')
       // The bet tx needs a block to be indexed before the server can verify
       // it; give it a moment, then retry once on 425.
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
-      } catch (registerErr) {
-        if (registerErr?.status !== 425) throw registerErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash)
-      }
+      await registerPatiently(() => registerRouletteBet(roundId, account.address, selectedBet.type, selectedBet.number || 0, amount, signed?.txHash))
       setMyBet({ ...selectedBet, amount })
       setPhase('confirmed')
     } catch (err) {
@@ -1386,6 +1409,8 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [turn, setTurn] = useState(null)
   const [boneyardRemaining, setBoneyardRemaining] = useState(null)
   const [handSizes, setHandSizes] = useState([7, 7])
+  const [houseRival, setHouseRival] = useState(false) // devnet: the service can seat the house as your opponent
+  const [houseSeated, setHouseSeated] = useState(false)
   const [showStep, setShowStep] = useState(0) // 0 last tile just landed -> 1 result announced
   const [joinInput, setJoinInput] = useState('')
   const [phase, setPhase] = useState('idle')
@@ -1395,6 +1420,12 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [result, setResult] = useState(null)
   const [proof, setProof] = useState(null)
   const socketRef = useRef(null)
+
+  useEffect(() => {
+    let alive = true
+    getCapabilities().then((c) => { if (alive) setHouseRival(Boolean(c?.houseRival)) }).catch(() => null)
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (mode !== 'waiting' || !roundId) return undefined
@@ -1472,7 +1503,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
         let boneyard = boneyardRemaining ?? 0
         for (let guard = 0; guard < 30 && !cancelled; guard++) {
           let hand
-          try { ({ hand } = await getDominoHand(roundId, botAddress)) }
+          try { ({ hand } = await getDominoHand(roundId, botAddress, { operator: true })) }
           catch { await new Promise((r) => setTimeout(r, 2000)); continue }
           const playable = hand.find((tile) => (ends == null) || legalDominoEnds(tile, ends).length > 0)
           let resp
@@ -1555,14 +1586,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerDominoJoin(rid, account.address, signed?.txHash)
-      } catch (regErr) {
-        if (regErr?.status !== 425) throw regErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerDominoJoin(rid, account.address, signed?.txHash)
-      }
+      await registerPatiently(() => registerDominoJoin(rid, account.address, signed?.txHash))
       // One signature now authorizes every move at this table; if it's
       // declined, moves fall back to signing individually.
       await openMoveSession('domino', rid, account)
@@ -1590,7 +1614,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   async function handleCreateTable() {
     setError('')
     try {
-      const created = await openDominoRound()
+      const created = await openDominoRound(account)
       const rid = created.roundId
       const info = await getDominoRoundInfo(rid)
       const infoObj = {
@@ -1607,6 +1631,11 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
 
   async function handleAddOpponent() {
     setError('')
+    if (houseRival) {
+      try { await seatHouseRival('domino', roundId, account); setHouseSeated(true) }
+      catch (err) { setError(err?.message || 'The house could not take the seat.') }
+      return
+    }
     const mine = account.address.toLowerCase()
     try {
       const seated = await addDominoOpponent(roundId)
@@ -1724,7 +1753,7 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
   function resetTable() {
     socketRef.current?.close()
     setMode('lobby'); setRoundId(null); setRoundInfo(null); setMySeat(null); setPlayers([]); setBotAddress(null)
-    setMyHand([]); setEnds(null); setBoardTiles([]); setTurn(null); setBoneyardRemaining(null); setHandSizes([7, 7])
+    setMyHand([]); setEnds(null); setBoardTiles([]); setTurn(null); setBoneyardRemaining(null); setHandSizes([7, 7]); setHouseSeated(false)
     setPhase('idle'); setError(''); setTxHash(''); setSelectedTile(null); setResult(null); setProof(null)
     setShowStep(0); setJoinInput('')
   }
@@ -1788,10 +1817,10 @@ function DominoRoom({ account, onConnect, refreshBalance = () => {} }) {
                     <div className="pk-waiting">
                       <span className="pk-street">WAITING FOR AN OPPONENT</span>
                       <p>Share this table ID: <code>{roundId}</code></p>
-                      {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
-                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                      {(houseRival || PRACTICE_OPPONENT) && mySeat === 0 && !botAddress && !houseSeated && (
+                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>{houseRival ? 'Play against the house' : 'Add practice opponent'}</span><b>→</b></button>
                       )}
-                      {botAddress && <p className="pk-dealing">Practice opponent seated — dealing…</p>}
+                      {(botAddress || houseSeated) && <p className="pk-dealing">{houseSeated ? 'The house took the seat' : 'Practice opponent seated'} — dealing…</p>}
                     </div>
                   ) : (
                     <>
@@ -1890,6 +1919,8 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   const [mySeat, setMySeat] = useState(null)
   const [, setPlayers] = useState([])
   const [botAddress, setBotAddress] = useState(null)
+  const [houseRival, setHouseRival] = useState(false) // devnet: the service can seat the house as your opponent
+  const [houseSeated, setHouseSeated] = useState(false)
   const [myHole, setMyHole] = useState([])
   const [table, setTable] = useState(POKER_EMPTY_TABLE)
   const [showStep, setShowStep] = useState(0) // 0 hand ending -> 1 cards turn over -> 2 result announced
@@ -1911,6 +1942,12 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
       allIn: status.allIn || [false, false], finished: Boolean(status.finished),
     })
   }
+
+  useEffect(() => {
+    let alive = true
+    getCapabilities().then((c) => { if (alive) setHouseRival(Boolean(c?.houseRival)) }).catch(() => null)
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (mode !== 'waiting' || !roundId) return undefined
@@ -2046,14 +2083,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
       })
       setTxHash(signed?.txHash || '')
       setPhase('submitted')
-      await new Promise((resolve) => setTimeout(resolve, 3500))
-      try {
-        await registerPokerJoin(rid, account.address, signed?.txHash)
-      } catch (regErr) {
-        if (regErr?.status !== 425) throw regErr
-        await new Promise((resolve) => setTimeout(resolve, 5000))
-        await registerPokerJoin(rid, account.address, signed?.txHash)
-      }
+      await registerPatiently(() => registerPokerJoin(rid, account.address, signed?.txHash))
       // One signature now authorizes every action at this table; if it's
       // declined, actions fall back to signing individually.
       await openMoveSession('poker', rid, account)
@@ -2081,7 +2111,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   async function handleCreateTable() {
     setError('')
     try {
-      const created = await openPokerRound()
+      const created = await openPokerRound(account)
       const rid = created.roundId
       const info = await getPokerRoundInfo(rid)
       const infoObj = {
@@ -2099,6 +2129,11 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
 
   async function handleAddOpponent() {
     setError('')
+    if (houseRival) {
+      try { await seatHouseRival('poker', roundId, account); setHouseSeated(true) }
+      catch (err) { setError(err?.message || 'The house could not take the seat.') }
+      return
+    }
     const mine = account.address.toLowerCase()
     try {
       const seated = await addPokerOpponent(roundId)
@@ -2226,7 +2261,7 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
   function resetTable() {
     socketRef.current?.close()
     setMode('lobby'); setRoundId(null); setRoundInfo(null); setMySeat(null); setPlayers([]); setBotAddress(null)
-    setMyHole([]); setTable(POKER_EMPTY_TABLE); setPhase('idle'); setError(''); setTxHash('')
+    setMyHole([]); setHouseSeated(false); setTable(POKER_EMPTY_TABLE); setPhase('idle'); setError(''); setTxHash('')
     setRaiseAmount(''); setResult(null); setProof(null); setShowStep(0); setJoinInput('')
   }
 
@@ -2299,10 +2334,10 @@ function PokerRoom({ account, onConnect, refreshBalance = () => {} }) {
                     <div className="pk-waiting">
                       <span className="pk-street">WAITING FOR AN OPPONENT</span>
                       <p>Share this table ID: <code>{roundId}</code></p>
-                      {PRACTICE_OPPONENT && mySeat === 0 && !botAddress && (
-                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>Add practice opponent</span><b>→</b></button>
+                      {(houseRival || PRACTICE_OPPONENT) && mySeat === 0 && !botAddress && !houseSeated && (
+                        <button className="cx-gold-button" onClick={handleAddOpponent}><span>{houseRival ? 'Play against the house' : 'Add practice opponent'}</span><b>→</b></button>
                       )}
-                      {botAddress && <p className="pk-dealing">Practice opponent seated — dealing…</p>}
+                      {(botAddress || houseSeated) && <p className="pk-dealing">{houseSeated ? 'The house took the seat' : 'Practice opponent seated'} — dealing…</p>}
                     </div>
                   ) : (
                     <>

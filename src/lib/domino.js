@@ -1,9 +1,11 @@
 import { jsonGet, jsonPost, jsonSessionPost, websocket } from './api.js'
 import { walletAction, walletAuthorizedPost, walletOperation } from './auth.js'
 import { moveSessionAuth } from './session.js'
+import { openTableWithWallet, readPrivate } from './lobby.js'
 
-export function openDominoRound() {
-  return jsonPost('/domino/rounds')
+// A wallet opens its own table with one signature; a local operator stack may still open one directly.
+export function openDominoRound(account) {
+  return account ? openTableWithWallet('domino', account) : jsonPost('/domino/rounds')
 }
 
 // Seat a custodial "practice opponent" (operator-funded, operator-signed).
@@ -35,8 +37,10 @@ export function getDominoRound(roundId) {
   return jsonGet(`/domino/rounds/${encodeURIComponent(roundId)}`)
 }
 
-export function getDominoHand(roundId, address) {
-  return jsonGet(`/domino/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`, { operator: true })
+// `operator: true` is only for the local practice opponent (a custodial seat the table session can't speak for).
+export function getDominoHand(roundId, address, { operator = false } = {}) {
+  const path = `/domino/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`
+  return operator ? jsonGet(path, { operator: true }) : readPrivate(path, roundId, address, 'hand')
 }
 
 export async function postDominoMove(roundId, address, actionContext, action, tile, end) {

@@ -1,5 +1,6 @@
 """DEV-ONLY mock FleetWallet backend. Signs with a throwaway BLS key against the
-ISOLATED local test chain (chain 1). Never point this at production."""
+ISOLATED test chain (chain 1) or, with DEV_WALLET_ALLOW_CHAIN=406, the disposable
+Canopy grad devnet. Never point this at production/mainnet."""
 import json, os, sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from blspy import BasicSchemeMPL, PrivateKey
@@ -8,14 +9,15 @@ from gameserver.chain import CanopyBridge, Key
 b = CanopyBridge(query_url=os.environ['CANOPY_QUERY_URL'], admin_url=os.environ['CANOPY_ADMIN_URL'],
                  plugin_url=os.environ['CANOPY_PLUGIN_URL'], chain_id=int(os.environ['CANOPY_CHAIN_ID']),
                  network_id=int(os.environ['CANOPY_NETWORK_ID']))
-assert os.environ['CANOPY_CHAIN_ID'] == '1', 'refusing to run against a non-test chain'
-KEYFILE = '/w/key.json'
+ALLOWED = {'1', os.environ.get('DEV_WALLET_ALLOW_CHAIN', '1')}
+assert os.environ['CANOPY_CHAIN_ID'] in ALLOWED, 'refusing to run against a non-test chain'
+KEYFILE = os.environ.get('DEV_WALLET_KEYFILE', '/w/key.json')
 if os.path.exists(KEYFILE):
     KEY = Key(**json.load(open(KEYFILE)))
 else:
-    KEY = b.new_key('devwallet'); os.makedirs('/w', exist_ok=True)
+    KEY = b.new_key('devwallet'); os.makedirs(os.path.dirname(KEYFILE), exist_ok=True)
     json.dump(KEY.__dict__, open(KEYFILE, 'w'))
-c = sqlite3.connect('/app/data/canasino.db')
+c = sqlite3.connect(os.environ.get('CASINO_DB_PATH', '/app/data/canasino.db'))
 r = c.execute("select address,public_key,private_key from keys where label='operator'").fetchone()
 OPERATOR = Key(address=r[0], public_key=r[1], private_key=r[2])
 

@@ -1,9 +1,11 @@
 import { jsonGet, jsonPost, jsonSessionPost, websocket } from './api.js'
 import { walletAction, walletAuthorizedPost, walletOperation } from './auth.js'
 import { moveSessionAuth } from './session.js'
+import { openTableWithWallet, readPrivate } from './lobby.js'
 
-export function openPokerRound() {
-  return jsonPost('/poker/rounds')
+// A wallet opens its own table with one signature; a local operator stack may still open one directly.
+export function openPokerRound(account) {
+  return account ? openTableWithWallet('poker', account) : jsonPost('/poker/rounds')
 }
 
 // Seat a custodial "practice opponent" (operator-funded, operator-signed).
@@ -34,8 +36,10 @@ export function getPokerRound(roundId) {
   return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}`)
 }
 
-export function getPokerHand(roundId, address) {
-  return jsonGet(`/poker/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`, { operator: true })
+// `operator: true` is only for the local practice opponent (a custodial seat the table session can't speak for).
+export function getPokerHand(roundId, address, { operator = false } = {}) {
+  const path = `/poker/rounds/${encodeURIComponent(roundId)}/hand?address=${encodeURIComponent(address)}`
+  return operator ? jsonGet(path, { operator: true }) : readPrivate(path, roundId, address, 'hand')
 }
 
 export async function postPokerAction(roundId, address, actionContext, action, amount = 0) {

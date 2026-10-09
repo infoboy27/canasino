@@ -1,6 +1,7 @@
-import { jsonGet, jsonPost, websocket } from './api.js'
+import { jsonGet, websocket } from './api.js'
 import { cardCost, wireAmount } from './amounts.js'
 import { walletAuthorizedPost, walletOperation } from './auth.js'
+import { lobbyBingo, readPrivate } from './lobby.js'
 
 export async function getRooms() {
   const rooms = await jsonGet('/rooms')
@@ -22,12 +23,11 @@ export async function getRooms() {
   })
 }
 
+// Opens (or returns) the joinable table for this room. The service decides the economics;
+// the browser holds no operator credential. A local stack with an operator token can still
+// open one directly.
 export function createRound(room) {
-  return jsonPost('/rounds', {
-    room: room.id,
-    entry_fee: room.entryFee,
-    rake_bps: room.rakeBps,
-  })
+  return lobbyBingo(room.id)
 }
 
 export function getRoundInfo(roundId) {
@@ -41,7 +41,8 @@ export function registerRound(roundId, address, numCards, txHash) {
 }
 
 export function getCard(roundId, address, numCards) {
-  return jsonGet(`/rounds/${encodeURIComponent(roundId)}/card?address=${encodeURIComponent(address)}&num_cards=${numCards}`, { operator: true })
+  const path = `/rounds/${encodeURIComponent(roundId)}/card?address=${encodeURIComponent(address)}&num_cards=${numCards}`
+  return readPrivate(path, roundId, address, 'card', { num_cards: numCards })
 }
 
 export function getRoundProof(roundId) {
